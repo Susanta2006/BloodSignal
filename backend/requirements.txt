@@ -7,3 +7,4 @@ redis>=5.0,<7.0
 pytest>=8.0
 pytest-asyncio>=0.23
 tzdata>=2024.1
+google-genai
