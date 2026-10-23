@@ -53,6 +53,7 @@ import {
   initialSearchForm,
   quantityUnits,
   searchRequestSchema,
+  type LocationSelection,
   type SearchFormValues,
   type SearchRequest,
 } from "@/features/blood-search/contracts";
@@ -91,7 +92,6 @@ export const Route = createFileRoute("/find")({
   component: BloodSearchPage,
 });
 
-type LocationSelection = SearchRequest["location"];
 type SearchState = "idle" | "submitting" | "tracking" | "ready" | "error";
 type AssistanceState = "idle" | "recording" | "transcribing" | "suggesting";
 
@@ -850,22 +850,23 @@ function BloodSearchPage() {
   }, []);
 
   const validateForm = (): SearchRequest | null => {
-    let nextLocation: LocationSelection | null = location;
-    if (!useDevice && values.district.trim() && values.state.trim()) {
-      nextLocation = {
-        mode: "manual",
-        district: values.district.trim(),
-        state: values.state.trim(),
-        country: "IN",
-      };
-    }
-    if (!nextLocation) {
-      const locationError = useDevice
-        ? "Waiting for device location. Allow browser permission or enter the state and district below."
-        : "Enter a city or district and state, or allow device location.";
-      setFormErrors((current) => ({ ...current, location: locationError }));
+    const district = values.district.trim();
+    const stateName = values.state.trim();
+    const nextErrors: Record<string, string> = {};
+    if (!stateName) nextErrors.state = "Choose a state to search for blood banks.";
+    if (!district) nextErrors.district = "Choose a district or city to search for blood banks.";
+    if (Object.keys(nextErrors).length) {
+      setFormErrors((current) => ({ ...current, ...nextErrors }));
+      setMessage("Choose the state and district to search. Device location is used for distance calculation only.");
       return null;
     }
+
+    // Device GPS is the distance origin, not the inventory search area. Keep the user's
+    // selected state and district in the request even when mobile automatically obtains GPS.
+    const nextLocation: LocationSelection =
+      useDevice && location?.mode === "device"
+        ? location
+        : { mode: "manual", district, state: stateName, country: "IN" };
     try {
       const payload = buildSearchRequest(values, nextLocation, true);
       const parsed = searchRequestSchema.safeParse(payload);
@@ -1279,7 +1280,7 @@ function BloodSearchPage() {
               <fieldset className="space-y-3">
                 <legend className="text-sm font-medium">Search location</legend>
                 <p className="text-xs leading-5 text-muted-foreground">
-                  Choose the state first, then the district. BloodSignal requests device location automatically for straight-line distance calculations; browser permission remains under your control. Coordinates are used for this search only.
+                  Choose the state and district to search for blood banks. Device location is used only to calculate straight-line distance; it does not replace your selected search area. Browser permission remains under your control, and coordinates are used for this search only.
                 </p>
 
                 <p role="status" aria-live="polite" className="text-xs text-muted-foreground">
