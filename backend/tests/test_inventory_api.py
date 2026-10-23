@@ -131,7 +131,7 @@ def test_ready_ok_with_memory_locally_and_reports_storage():
 
 
 def test_ready_fails_in_production_without_durable_storage():
-    c, *_ = client(app_env="production")
+    c, *_ = client(app_env="production", token_hash_secret="test-production-secret-32-bytes-min")
     r = c.get("/health/ready")
     assert r.status_code == 503 and r.json()["inventory_storage"]["state"] == "OK"
     assert r.json()["inventory_storage"]["backend"] == "memory"

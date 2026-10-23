@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable
 
 from app.config import Settings
@@ -19,7 +19,7 @@ from app.services.directory import BankDirectory, DirectoryUnavailable
 from app.services.geography import GEO_POLICY_VERSION, nearby_districts
 from app.services import ranking
 from app.services.routes import RoutesClient
-from app.services.stock_source import SourceError, SourceUnavailable, StockSourceAdapter
+from app.services.stock_source import SourceError, SourceResult, SourceUnavailable, StockSourceAdapter
 from app.services.store import MemoryStore
 
 log = logging.getLogger("orchestrator")
@@ -137,11 +137,19 @@ class Orchestrator:
                        "Waiting for location")
             return
 
+        allow_expansion = bool(req.include_nearby_districts and req.district
+                               and self.stock.source_type == "live")
+
         async def t03():
-            run.plan = {"districts": [req.district], "radius_km": req.max_radius_km,
-                        "geo_policy": GEO_POLICY_VERSION, "freshness_hours": self.s.freshness_hours,
-                        "rule_version": matching.RULE_VERSION}
-            return None, "Local-first plan; expansion is suggested, not automatic"
+            run.plan = {"districts": [req.district] if req.district else [],
+                        "radius_km": req.max_radius_km,
+                        "geo_policy": GEO_POLICY_VERSION,
+                        "freshness_hours": self.s.freshness_hours,
+                        "rule_version": matching.RULE_VERSION,
+                        "search_level": "local_district"}
+            return None, ("Local-first search with bounded adjacent-district fallback enabled for live stock"
+                          if allow_expansion else
+                          "Local-first search; automatic expansion is disabled for this request/source")
         await self._task(rid, "T03_PLAN_SEARCH", t03)
 
         inventory_ready, inventory_reason = self.stock.configured()
@@ -162,7 +170,14 @@ class Orchestrator:
             if not inventory_ready:
                 self._not_configured(run, inventory_reason)
                 return
-            raise
+            if allow_expansion:
+                banks = []
+                run.plan["local_directory_lookup_failed"] = True
+                run.plan["expansion_warnings"] = [
+                    "Local directory lookup failed; bounded neighboring-district lookups will still be attempted."
+                ]
+            else:
+                raise
         by_id: dict[str, BloodBank] = {}
 
         def index(bs):
@@ -178,7 +193,7 @@ class Orchestrator:
             self._not_configured(run, inventory_reason, banks=banks, by_id=by_id)
             return
 
-        if not provides and not banks:
+        if not provides and not banks and not allow_expansion:
             self._skip(rid, [t.task_code for t in self.store.tasks[rid]][4:10], "No banks to check")
             self._finalise(run, req, banks, [], [], source=self.stock, source_failed=False, records_n=0)
             return
@@ -196,19 +211,34 @@ class Orchestrator:
             except asyncio.TimeoutError as e:
                 raise SourceUnavailable("timeout") from e
             return res, f"{len(res.records)} records from {res.source_display_name}"
-        try:
-            result = await self._task(rid, "T05_FETCH_STOCK", t05,
-                                      max_attempts=self.s.stock_source_max_attempts,
-                                      retry_on=(SourceUnavailable,))
-        except TaskFailed as e:
-            source_failed, source_err = True, e.code
+        if not provides and not banks and allow_expansion:
+            # Do not ask a live stock adapter to fetch an empty list of bank IDs. Mark the local
+            # phase as completed-with-no-candidates, then let the bounded district fallback run.
+            task = self.store.task(rid, "T05_FETCH_STOCK")
+            task.status, task.started_at, task.completed_at = TaskStatus.SUCCEEDED, self.clock(), self.clock()
+            task.output_summary = "No local directory candidates; continuing to bounded neighboring-district lookup"
+            result = SourceResult(
+                source_id=self.stock.source_id,
+                source_display_name=self.stock.source_display_name,
+                source_type=self.stock.source_type,
+                source_label=self.stock.source_label,
+                official_url=self.stock.official_url,
+                records=[], banks=[], checked_bank_ids=[],
+            )
+        else:
+            try:
+                result = await self._task(rid, "T05_FETCH_STOCK", t05,
+                                          max_attempts=self.s.stock_source_max_attempts,
+                                          retry_on=(SourceUnavailable,))
+            except TaskFailed as e:
+                source_failed, source_err = True, e.code
         if source_failed is False and result is None:
             source_failed, source_err = True, "SOURCE_UNAVAILABLE"
 
         if not source_failed and provides:
             banks = list(result.banks)
             index(banks)
-            if not banks:
+            if not banks and not allow_expansion:
                 self._skip(rid, ["T06_NORMALIZE_EVIDENCE", "T07_MATCH_REQUIREMENTS", "T08_CHECK_FRESHNESS",
                                  "T09_CALCULATE_ROUTES", "T10_VERIFY_RESULTS"],
                            "Source returned no usable records")
@@ -226,6 +256,154 @@ class Orchestrator:
             self._finalise(run, req, banks, decisions, [], source=self.stock, source_failed=True,
                            records_n=0, routes_by_bank={}, by_id=by_id, error_code=source_err)
             return
+
+        # Bounded multi-district fallback is part of the live search pipeline, not a UI-only
+        # suggestion. It runs only when current local inventory cannot cover the full request.
+        # The configured geography map is still marked unverified; each returned bank retains its
+        # source-provided district/address and the UI must not infer road distance from this scope.
+        areas_checked = [req.district] if req.district else []
+        expansion_warnings = list(run.plan.get("expansion_warnings", []))
+        search_level = "local_district"
+        if allow_expansion and result is not None and req.quantity > 0:
+            def usable_by_bank(records):
+                now = self.clock()
+                grouped: dict[str, list] = {}
+                for record in records:
+                    if (matching.norm_group(record.blood_group) != req.blood_group.value
+                            or matching.norm_component(record.component) != req.component.value
+                            or matching.norm_unit(record.quantity_unit) != req.quantity_unit.value
+                            or record.quantity is None or record.quantity <= 0
+                            or record.reported_status != "available"
+                            or not record.source_id
+                            or not (record.source_url or record.source_record_id)
+                            or record.source_updated_at is None
+                            or record.source_updated_at > now + matching.CLOCK_SKEW
+                            or now - record.source_updated_at > timedelta(hours=self.s.freshness_hours)):
+                        continue
+                    grouped.setdefault(record.bank_source_id, []).append(record)
+                usable: dict[str, float] = {}
+                for bank_source_id, group in grouped.items():
+                    latest_at = max(row.source_updated_at for row in group)
+                    latest = [row for row in group if row.source_updated_at == latest_at]
+                    signatures = {(row.reported_status, row.quantity, matching.norm_unit(row.quantity_unit))
+                                  for row in latest}
+                    # Conflicting latest reports from the same facility do not count toward
+                    # fulfillment; matching will expose them as a conflict for review.
+                    if len(signatures) == 1:
+                        usable[bank_source_id] = float(latest[0].quantity)
+                return usable
+
+            local_usable = usable_by_bank(result.records)
+            local_total = sum(local_usable.values())
+            if local_total < req.quantity:
+                already_bank_ids = {bank.bank_id for bank in banks}
+                already_place_ids = {bank.provider_place_id for bank in banks if bank.provider_place_id}
+                seen_record_keys = {
+                    (row.bank_source_id, row.source_id, row.blood_group, row.component,
+                     row.source_record_id or row.raw_record_hash, row.source_updated_at,
+                     row.quantity, row.quantity_unit, row.reported_status)
+                    for row in result.records
+                }
+                neighboring_records = []
+                adjacent_banks = []
+                contributed_usable = False
+                for district_name in nearby_districts(req.district)[:3]:
+                    if sum(usable_by_bank([*result.records, *neighboring_records]).values()) >= req.quantity:
+                        break
+                    areas_checked.append(district_name)
+                    new_banks = []
+                    try:
+                        if provides:
+                            extra = await asyncio.wait_for(
+                                self.stock.fetch_stock([], req.blood_group.value, req.component.value,
+                                                       district_name, state=req.state, quantity=req.quantity),
+                                timeout=self.s.stock_source_timeout_s)
+                            candidate_banks = list(extra.banks)
+                        else:
+                            candidate_banks = await self.directory.discover(
+                                district=district_name, state=req.state, origin=origin,
+                                radius_km=req.max_radius_km)
+                            new_ids = {bank.bank_id for bank in candidate_banks
+                                       if bank.bank_id not in already_bank_ids
+                                       and (not bank.provider_place_id
+                                            or bank.provider_place_id not in already_place_ids)}
+                            candidate_banks = [bank for bank in candidate_banks if bank.bank_id in new_ids]
+                            if not candidate_banks:
+                                continue
+                            extra = await asyncio.wait_for(
+                                self.stock.fetch_stock([bank.bank_id for bank in candidate_banks],
+                                                       req.blood_group.value, req.component.value,
+                                                       district_name, state=req.state, quantity=req.quantity),
+                                timeout=self.s.stock_source_timeout_s)
+                    except (DirectoryUnavailable, SourceError, asyncio.TimeoutError) as exc:
+                        expansion_warnings.append(
+                            f"Could not check configured nearby district {district_name} ({type(exc).__name__}); continuing."
+                        )
+                        continue
+                    except Exception as exc:  # noqa: BLE001 - one district must not abort others
+                        log.warning("adjacent_search_failed district=%s error_class=%s",
+                                    district_name, type(exc).__name__)
+                        expansion_warnings.append(
+                            f"Could not check configured nearby district {district_name}; continuing with other areas."
+                        )
+                        continue
+
+                    if provides:
+                        candidate_banks = list(extra.banks)
+                    for bank in candidate_banks:
+                        if bank.bank_id in already_bank_ids:
+                            continue
+                        if bank.provider_place_id and bank.provider_place_id in already_place_ids:
+                            continue
+                        already_bank_ids.add(bank.bank_id)
+                        if bank.provider_place_id:
+                            already_place_ids.add(bank.provider_place_id)
+                        new_banks.append(bank)
+                    accepted_ids = {bank.bank_id for bank in new_banks}
+                    for row in extra.records:
+                        key = (row.bank_source_id, row.source_id, row.blood_group, row.component,
+                               row.source_record_id or row.raw_record_hash, row.source_updated_at,
+                               row.quantity, row.quantity_unit, row.reported_status)
+                        if row.bank_source_id not in accepted_ids or key in seen_record_keys:
+                            continue
+                        seen_record_keys.add(key)
+                        neighboring_records.append(row)
+                    adjacent_banks.extend(new_banks)
+                    # `provides_directory` sources use identities from the stock response; other
+                    # sources use the directory's validated identity rows. Never invent a district.
+                    usable_after = usable_by_bank([*result.records, *neighboring_records])
+                    if sum(usable_after.values()) > local_total:
+                        contributed_usable = True
+                    if sum(usable_after.values()) >= req.quantity:
+                        break
+
+                if neighboring_records and contributed_usable:
+                    merged_records = [*result.records, *neighboring_records]
+                    record_bank_ids = {row.bank_source_id for row in neighboring_records}
+                    banks.extend(bank for bank in adjacent_banks if bank.bank_id in record_bank_ids)
+                    # Re-index the merged facilities, preserving their original source attributes.
+                    index(banks)
+                    result = result.model_copy(update={
+                        "records": merged_records,
+                        "banks": list(banks) if provides else result.banks,
+                        "checked_bank_ids": list(dict.fromkeys([
+                            *result.checked_bank_ids, *[bank.bank_id for bank in adjacent_banks]
+                        ])),
+                    })
+                    search_level = "expanded_nearest_districts"
+                    expansion_warnings.append(
+                        f"Expanded to configured nearby districts ({GEO_POLICY_VERSION}); this geographic map is unverified. "
+                        "Confirm the source-reported district and current stock directly with the facility."
+                    )
+                elif neighboring_records:
+                    # Do not inject unverified/non-contributing adjacent rows into ranked results.
+                    expansion_warnings.append(
+                        "Nearby districts were checked, but no current, exact-scope positive stock report contributed to fulfillment."
+                    )
+            run.plan["districts"] = areas_checked
+            run.plan["search_level"] = search_level
+            if expansion_warnings:
+                run.plan["expansion_warnings"] = expansion_warnings
 
         # T06 normalise + persist evidence (immutable)
         async def t06():
@@ -390,6 +568,7 @@ class Orchestrator:
 
         has_a = any(c.section == Section.A_ELIGIBLE and c.source_type == "live" for c in cands)
         has_b = any(c.section == Section.B_UNCERTAIN and c.source_type == "live" for c in cands)
+        has_insufficient = any(c.section == Section.C_INSUFFICIENT and c.source_type == "live" for c in cands)
         has_demo = any(c.source_type == "demo" for c in cands)
         if source_failed:
             result_state, status = "SOURCE_UNAVAILABLE", RunStatus.NEEDS_REVIEW
@@ -404,6 +583,11 @@ class Orchestrator:
         elif has_b:
             result_state, status = "UNCERTAIN_ONLY", RunStatus.AWAITING_APPROVAL
             action = "Only stale, conflicting or untimed records were found. Call these banks to reconfirm."
+        elif has_insufficient:
+            result_state, status = "INSUFFICIENT_STOCK", RunStatus.COMPLETED
+            action = ("Matching blood-group and component records were found, but no single facility has "
+                      "enough reported stock to fulfill the full requested quantity. The quantities shown "
+                      "are partial source reports; call facilities to verify current availability.")
         elif has_demo:
             result_state, status = "DEMO_RESULTS_ONLY", RunStatus.COMPLETED
             action = ("Synthetic demo inventory matched this request. It is not real stock evidence "
@@ -420,7 +604,21 @@ class Orchestrator:
             source_state = "NO_MATCHING_RECORDS"
         else:
             source_state = "LIVE_RESULTS"
-        suggested = [] if has_a else (nearby_districts(req.district) if req.include_nearby_districts else [])
+        search_level = run.plan.get("search_level", "local_district")
+        areas_checked = run.plan.get("districts", [req.district] if req.district else [])
+        checked_keys = {str(area).strip().casefold() for area in areas_checked if area}
+        suggested = ([] if has_a else [
+            area for area in (nearby_districts(req.district) if req.include_nearby_districts else [])
+            if area.strip().casefold() not in checked_keys
+        ])
+        expansion_warnings = run.plan.get("expansion_warnings", [])
+        if search_level == "expanded_nearest_districts":
+            expansion_note = (f"Checked configured nearby districts ({GEO_POLICY_VERSION}); the geographic map is unverified. "
+                              "Facility district and current inventory must be confirmed with the source.")
+        elif suggested:
+            expansion_note = ("Suggested areas only: they were not checked by this run; we make no claim that stock exists there.")
+        else:
+            expansion_note = None
         run.result_state = result_state
         run.summary = {
             "result_state": result_state, "source_state": source_state, "user_action": action,
@@ -433,8 +631,8 @@ class Orchestrator:
                         "type": source.source_type} if source else None),
             "freshness_hours": self.s.freshness_hours, "rule_version": matching.RULE_VERSION,
             "verifier_rejected": rejected, "suggested_districts": suggested,
-            "expansion_note": ("Suggested areas only: we have not checked them and make no claim "
-                               "that stock exists there.") if suggested else None,
-            "areas_checked": [req.district] if req.district else [],
+            "search_level": search_level, "expansion_note": expansion_note,
+            "expansion_warnings": expansion_warnings,
+            "areas_checked": areas_checked,
         }
         self._set_status(run, status, result_state)

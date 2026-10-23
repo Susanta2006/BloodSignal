@@ -380,8 +380,9 @@ def test_live_failure_never_substitutes_demo():
 
 
 def test_live_is_default_for_hackathon_and_explicit_demo_is_honoured():
-    assert Settings(app_env="production").stock_source_mode == "live"
-    assert Settings(app_env="production", stock_source_mode="demo").stock_source_mode == "demo"
+    secret = "test-production-secret-32-bytes-min"
+    assert Settings(app_env="production", token_hash_secret=secret).stock_source_mode == "live"
+    assert Settings(app_env="production", stock_source_mode="demo", token_hash_secret=secret).stock_source_mode == "demo"
     assert Settings(app_env="local").stock_source_mode == "live"
 
 

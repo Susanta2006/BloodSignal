@@ -284,3 +284,53 @@ def test_agent_rejects_partial_coordinate_pair():
     from pydantic import ValidationError
     with pytest.raises(ValidationError):
         Filters(latitude=24.8)
+
+
+def test_coordinator_expands_to_nearby_district_when_local_stock_is_insufficient():
+    """Uses district-specific test fixtures; this is not real-world facility data."""
+    from app.services.stock_source import SourceResult
+
+    class DistrictAwareFakeLive(FakeLive):
+        def __init__(self):
+            super().__init__()
+            self.calls_by_district = []
+            local_bank = bank("local", "Local Test Bank").model_copy(
+                update={"district": "Imphal West", "state": "Manipur"})
+            adjacent_bank = bank("adjacent", "Adjacent Test Bank").model_copy(
+                update={"district": "Imphal East", "state": "Manipur"})
+            self.rows_by_district = {
+                "Imphal West": ([local_bank], [srec("local", qty=2, rid="local-r")]),
+                "Imphal East": ([adjacent_bank], [srec("adjacent", qty=4, rid="adj-r")]),
+                "Thoubal": ([], []),
+                "Bishnupur": ([], []),
+            }
+
+        async def fetch_stock(self, bank_ids, blood_group, component, district, *, state=None, quantity=None):
+            self.calls += 1
+            self.calls_by_district.append(district)
+            banks, records = self.rows_by_district.get(district, ([], []))
+            return SourceResult(
+                source_id=self.source_id,
+                source_display_name=self.source_display_name,
+                source_type="live",
+                source_label=self.source_label,
+                banks=list(banks),
+                records=list(records),
+                checked_bank_ids=[b.bank_id for b in banks],
+            )
+
+    adapter = DistrictAwareFakeLive()
+    svc, *_ = make(adapter=adapter)
+    out = run(coord(svc).run(req(quantity=5, **STRUCT)))
+
+    assert out.status == "COMPLETED"
+    assert out.search_level == "expanded_nearest_districts"
+    assert {c.bank_id for c in out.candidates} == {"local", "adjacent"}
+    assert out.inventory.pagination.total == 2
+    assert adapter.calls_by_district[:2] == ["Imphal West", "Imphal East"]
+    assert any("mapping is unverified" in warning for warning in out.warnings)
+    assert any("not reservations" in warning for warning in out.inventory.warnings)
+    # 2 local + 4 adjacent is enough to cover 5 at the aggregate-search level, but
+    # the individual facility rows still report their own quantity and no reservation.
+    quantities = {c.bank_id: c.reported_quantity for c in out.candidates}
+    assert quantities == {"local": 2, "adjacent": 4}

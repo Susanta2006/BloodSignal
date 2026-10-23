@@ -131,6 +131,7 @@ class AgentSearchResponse(BaseModel):
     run_id: str
     status: str                      # COMPLETED | NEEDS_CLARIFICATION | UNAVAILABLE | TIMED_OUT | LIMIT_REACHED
     used_llm: bool
+    search_level: str = "local_district"  # local_district | expanded_nearest_districts
     approval_required: bool = True
     action_taken: bool = False
     clarification: str | None = None

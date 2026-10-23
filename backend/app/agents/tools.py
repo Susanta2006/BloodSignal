@@ -149,6 +149,6 @@ def classify(it: BankStockOut) -> str:
         return "UNRELIABLE"
     for s in it.stock:
         if (set(s.flags) & _LIMITED or s.source_freshness != "WITHIN_WINDOW" or s.quantity is None
-                or not s.quantity_unit):
+                or not s.quantity_unit or s.reported_status != "available" or s.quantity <= 0):
             return "LIMITED"
     return "GOOD"

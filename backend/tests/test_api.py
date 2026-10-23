@@ -281,12 +281,107 @@ def test_run_token_required_and_scoped(make_client):
 
 
 # ---------------------------------------------------------- approval / outcome
+
+class DistrictLiveAdapter:
+    """Deterministic live-source fixture; district contents are test data, not real inventory."""
+    source_id = "district-live-test"
+    source_display_name = "District live test source"
+    source_type = "live"
+    source_label = "Test inventory source"
+    official_url = "https://example.gov.in/inventory"
+    provides_directory = True
+
+    def __init__(self, districts):
+        self.districts = districts
+        self.calls = []
+
+    def configured(self):
+        return True, ""
+
+    async def status(self):
+        from app.services.stock_source import SourceStatusInfo
+        return SourceStatusInfo("READY", "test fixture")
+
+    async def fetch_stock(self, bank_ids, blood_group, component, district, *, state=None, quantity=None):
+        from app.services.stock_source import SourceResult
+        self.calls.append(district)
+        banks, records = self.districts.get((district or "").casefold(), ([], []))
+        return SourceResult(
+            source_id=self.source_id,
+            source_display_name=self.source_display_name,
+            source_type=self.source_type,
+            source_label=self.source_label,
+            official_url=self.official_url,
+            records=list(records),
+            banks=list(banks),
+            checked_bank_ids=[bank.bank_id for bank in banks],
+        )
+
+
+def _live_area_fixture(*, local_qty=3, neighbor_qty=4, duplicate_neighbor=False, include_second_local=False):
+    from app.schemas import BloodBank
+
+    local_bank = BloodBank(bank_id="demo-bank-local", name="Local Test Blood Bank",
+                           address="Lamphel, Imphal West, Manipur", district="Imphal West",
+                           state="Manipur", source_type="live")
+    neighbor_bank = BloodBank(bank_id="demo-bank-neighbor", name="Nearby Test Blood Bank",
+                              address="Imphal East, Manipur", district="Imphal East",
+                              state="Manipur", source_type="live")
+    local_row = rec(bank="local", qty=local_qty, age_h=2, source="district-live-test", rid="local-row")
+    neighbor_row = rec(bank="neighbor", qty=neighbor_qty, age_h=2,
+                       source="district-live-test", rid="neighbor-row")
+    local_row = local_row.model_copy(update={"source_url": "https://example.gov.in/inventory"})
+    neighbor_row = neighbor_row.model_copy(update={"source_url": "https://example.gov.in/inventory"})
+    local_banks, local_rows = [local_bank], [local_row]
+    if include_second_local:
+        second_bank = BloodBank(bank_id="demo-bank-local-alt", name="Second Local Test Blood Bank",
+                                address="Imphal West, Manipur", district="Imphal West",
+                                state="Manipur", source_type="live")
+        second_row = rec(bank="local-alt", qty=3, age_h=3, source="district-live-test", rid="local-alt-row")
+        second_row = second_row.model_copy(update={"source_url": "https://example.gov.in/inventory"})
+        local_banks.append(second_bank)
+        local_rows.append(second_row)
+    neighbor_rows = [neighbor_row, neighbor_row.model_copy()] if duplicate_neighbor else [neighbor_row]
+    return DistrictLiveAdapter({
+        "imphal west": (local_banks, local_rows),
+        "imphal east": ([neighbor_bank], neighbor_rows),
+        "thoubal": ([], []),
+        "bishnupur": ([], []),
+    })
+
 def _proposal(client, run_id, h, ids=None):
     return client.post(f"/api/runs/{run_id}/proposal", json={"candidate_ids": ids}, headers=h)
 
 
-def test_approval_flow_and_version_invalidation(make_client):
+def test_ineligible_candidate_ids_cannot_bypass_proposal_filter(make_client):
     client, _ = make_client()
+    run_id, headers = start(client, payload(comp="platelets"))
+    mismatched = next(candidate for candidate in cands(client, run_id, headers)
+                      if candidate["section"] == "D_MISMATCH")
+    response = _proposal(client, run_id, headers, [mismatched["candidate_id"]])
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "CANDIDATE_NOT_REVIEWABLE"
+
+
+def test_live_search_expands_only_when_local_stock_is_insufficient_and_deduplicates(make_client):
+    adapter = _live_area_fixture(local_qty=2, neighbor_qty=4, duplicate_neighbor=True)
+    client, _ = make_client(stock=adapter, stock_source_mode="live")
+    run_id, headers = start(client, payload(qty=5))
+    run = client.get(f"/api/runs/{run_id}", headers=headers).json()
+    results = cands(client, run_id, headers)
+
+    assert adapter.calls == ["Imphal West", "Imphal East"]
+    assert run["summary"]["search_level"] == "expanded_nearest_districts"
+    assert run["summary"]["areas_checked"] == ["Imphal West", "Imphal East"]
+    assert run["result_state"] == "INSUFFICIENT_STOCK"
+    assert len(results) == 2
+    assert {item["bank"]["bank_id"] for item in results} == {"demo-bank-local", "demo-bank-neighbor"}
+    assert all(item["section"] == "C_INSUFFICIENT" for item in results)
+    assert "no single facility" in run["summary"]["user_action"].lower()
+
+
+def test_approval_flow_and_version_invalidation(make_client):
+    client, _ = make_client(stock=_live_area_fixture(include_second_local=True), stock_source_mode="live")
     run_id, h = start(client, payload())
     cs = cands(client, run_id, h)
     a_id = next(c["candidate_id"] for c in cs if c["section"] == "A_ELIGIBLE")
@@ -313,7 +408,7 @@ def test_approval_flow_and_version_invalidation(make_client):
 
 
 def test_outcome_requires_approval_and_is_idempotent(make_client):
-    client, c = make_client()
+    client, c = make_client(stock=_live_area_fixture(include_second_local=True), stock_source_mode="live")
     run_id, h = start(client, payload())
     cid = next(x["candidate_id"] for x in cands(client, run_id, h) if x["section"] == "A_ELIGIBLE")
     body = {"candidate_id": cid, "outcome": "confirmed_available"}
@@ -395,7 +490,7 @@ def test_voice_upload_rejects_non_audio_and_keeps_provider_optional(make_client)
 
 
 def test_interactive_api_docs_are_disabled_in_production(make_client):
-    client, _ = make_client(app_env="production")
+    client, _ = make_client(app_env="production", token_hash_secret="t" * 32)
     assert client.get("/docs").status_code == 404
     assert client.get("/redoc").status_code == 404
     assert client.get("/openapi.json").status_code == 404

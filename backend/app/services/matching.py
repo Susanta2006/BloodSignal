@@ -3,11 +3,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+import logging
+import math
 
 from app.schemas import (BloodGroup, Component, EvidenceRecord, EvidenceState, MatchState,
                          QuantityUnit, Section, StoredRequest)
 
-RULE_VERSION = "match-rules-1.0.0"
+RULE_VERSION = "match-rules-1.1.0"
+log = logging.getLogger("matching")
 CLOCK_SKEW = timedelta(minutes=5)
 _MIN = datetime.min.replace(tzinfo=timezone.utc)
 
@@ -60,32 +63,133 @@ def _ts_key(r: EvidenceRecord) -> datetime:
 
 
 # ------------------------------------------------------------ T07: matching
+_QUANTITY_FIELDS = ("available_units", "reported_units", "units", "quantity")
+
+
+def _record_value(record, field_name: str):
+    return record.get(field_name) if isinstance(record, dict) else getattr(record, field_name, None)
+
+
+def _number(value) -> float | None:
+    """Parse a stock count without accepting booleans, NaN, infinity or malformed text."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
 def _reported_units(record) -> float | None:
-    """Read stock quantity across supported upstream schemas; unknown is not positive stock."""
-    for field_name in ("units", "available_units", "reported_units", "quantity"):
-        value = record.get(field_name) if isinstance(record, dict) else getattr(record, field_name, None)
-        if value is not None:
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                return None
+    """Resolve a reported stock count conservatively across legacy/current schemas.
+
+    Precedence for conflicting *positive* reports is available_units, reported_units,
+    units, then quantity. An explicit zero/negative value in any supported field wins over
+    positive values in other fields: it may be a newer depletion report while another field
+    is stale. A malformed value in the highest-priority populated field is UNKNOWN rather
+    than permission to fall back to a lower-priority, potentially stale value. Null fields
+    are treated as absent. The input record is never mutated.
+    """
+    raw_values: list[tuple[str, object, float | None]] = []
+    for field_name in _QUANTITY_FIELDS:
+        raw = _record_value(record, field_name)
+        if raw is not None:
+            raw_values.append((field_name, raw, _number(raw)))
+
+    # Fail closed if any explicit quantity says the stock is depleted or negative.
+    for _field_name, _raw, parsed in raw_values:
+        if parsed is not None and parsed <= 0:
+            return parsed
+
+    # Use the best-ranked populated field; malformed authoritative data stays unknown.
+    if raw_values:
+        return raw_values[0][2]
     return None
 
 
-def match_blood_inventory(records, *args, **kwargs):
-    """Return only records with explicitly positive reported stock.
+def _as_value(value):
+    return getattr(value, "value", value)
 
-    Supports dict and object records from both legacy and current inventory schemas.
-    Records with missing, malformed, zero, or negative quantities are excluded.
-    Remaining matching arguments are intentionally delegated to the caller.
+
+def _record_identifier(record, index: int) -> str:
+    for name in ("bank_id", "id", "facility_id", "code"):
+        value = _record_value(record, name)
+        if value is not None and str(value).strip():
+            return str(value).strip()[:80]
+    return f"index:{index}"
+
+
+def match_blood_inventory(records, *args, **kwargs):
+    """Return only known positive-stock records that match supplied request constraints.
+
+    Supported optional request inputs are ``blood_group``/``requested_blood_group``,
+    ``component``/``requested_component``, and ``required_units``/``requested_units``.
+    A request object may also be passed as the first positional argument or ``request=``.
+    When a constraint is omitted, the helper preserves its historical positive-stock-only
+    behavior; the primary application pipeline uses ``match_bank`` with a typed request.
     """
-    return [record for record in records if (_reported_units(record) is not None
-                                               and _reported_units(record) > 0)]
+    request = kwargs.get("request") or kwargs.get("req")
+    if request is None and args and any(hasattr(args[0], key) for key in ("blood_group", "component")):
+        request = args[0]
+
+    target_group = kwargs.get("blood_group", kwargs.get("requested_blood_group"))
+    target_component = kwargs.get("component", kwargs.get("requested_component"))
+    required = kwargs.get("required_units", kwargs.get("requested_units", kwargs.get("quantity")))
+    if request is not None:
+        target_group = target_group if target_group is not None else getattr(request, "blood_group", None)
+        target_component = target_component if target_component is not None else getattr(request, "component", None)
+        required = required if required is not None else getattr(request, "quantity", None)
+
+    group_was_supplied = target_group is not None
+    component_was_supplied = target_component is not None
+    target_group = norm_group(str(_as_value(target_group))) if group_was_supplied else None
+    target_component = norm_component(str(_as_value(target_component))) if component_was_supplied else None
+    if (group_was_supplied and target_group is None) or (component_was_supplied and target_component is None):
+        return []
+    required_units = _number(required) if required is not None else None
+    if required is not None and (required_units is None or required_units < 1):
+        log.debug("inventory_filter_excluded request reason=invalid_required_quantity")
+        return []
+    if target_group is not None and target_group not in _GROUPS:
+        return []
+    if target_component is not None and target_component not in _COMPONENTS:
+        return []
+
+    matched = []
+    for index, record in enumerate(records or []):
+        quantity = _reported_units(record)
+        reason = None
+        if quantity is None:
+            reason = "stock_unknown"
+        elif quantity <= 0:
+            reason = "stock_non_positive"
+        elif required_units is not None and quantity < required_units:
+            reason = "insufficient_quantity"
+
+        if reason is None and target_group is not None:
+            actual_group = norm_group(str(_as_value(
+                _record_value(record, "blood_group") or _record_value(record, "bloodGroup")
+                or _record_value(record, "group") or "")))
+            if actual_group != target_group:
+                reason = "blood_group_mismatch_or_unknown"
+        if reason is None and target_component is not None:
+            actual_component = norm_component(str(_as_value(
+                _record_value(record, "component") or _record_value(record, "blood_component") or "")))
+            if actual_component != target_component:
+                reason = "component_mismatch_or_unknown"
+
+        if reason is None:
+            matched.append(record)
+        else:
+            log.debug("inventory_record_excluded record_id=%s reason=%s",
+                      _record_identifier(record, index), reason)
+    return matched
 
 
 def match_bank(bank_id: str, records: list[EvidenceRecord], req: StoredRequest) -> BankMatch:
-    # Zero/negative quantities must never be treated as valid inventory matches.
-    records = [r for r in records if r.quantity is None or r.quantity > 0]
+    # Keep zero reports in the evidence set: dropping them here would hide a current depletion
+    # report or erase a same-timestamp disagreement with a positive report from the same source.
     want_g, want_c, want_u = req.blood_group.value, req.component.value, req.quantity_unit.value
     exact = [r for r in records
              if norm_group(r.blood_group) == want_g and norm_component(r.component) == want_c]
@@ -131,6 +235,10 @@ def match_bank(bank_id: str, records: list[EvidenceRecord], req: StoredRequest) 
         return m(MatchState.NOT_MATCHED, ["STATUS_NOT_AVAILABLE"])
     if sel.reported_status != "available":
         return m(MatchState.UNKNOWN, ["STATUS_UNREPORTED"], ["reported_status"])
+    if sel.quantity == 0:
+        return m(MatchState.INSUFFICIENT, ["ZERO_STOCK", "INSUFFICIENT_QUANTITY"])
+    if sel.quantity < 0:
+        return m(MatchState.UNKNOWN, ["INVALID_NEGATIVE_QUANTITY"], ["quantity"])
     if sel.quantity < req.quantity:
         return m(MatchState.INSUFFICIENT, ["UNIT_COMPATIBLE", "INSUFFICIENT_QUANTITY"])
     return m(MatchState.MATCHED_REPORTED,
@@ -209,6 +317,10 @@ def display_note(d: Decision, req: StoredRequest, now: datetime) -> str:
         return "We could not check this source; this is not evidence of no stock."
     if d.evidence_state == EvidenceState.CONFLICTING_REPORTS:
         return "Sources disagree; call the blood bank before travel."
+    if "ZERO_STOCK" in d.reason_codes and d.selected:
+        return "The source reports zero available units for this request; this is not a stock match."
+    if "STATUS_NOT_AVAILABLE" in d.reason_codes:
+        return "The source explicitly reports this stock as unavailable."
     if d.section == Section.C_INSUFFICIENT and d.selected:
         return (f"Source reports {d.selected.quantity:g} {d.selected.quantity_unit}, "
                 f"fewer than the {req.quantity} requested.")

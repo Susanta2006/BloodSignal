@@ -118,3 +118,44 @@ def test_same_source_newer_report_supersedes_older():
     d = dec([ev(qty=0, status="unavailable", age_h=30, source="s1", rid="old"),
              ev(qty=5, age_h=2, source="s1", rid="new")])
     assert d.section == Section.A_ELIGIBLE and len(d.evidence_ids) == 2
+
+
+def test_legacy_inventory_quantity_fields_fail_closed_and_match_exact_scope():
+    from app.services.matching import match_blood_inventory
+
+    good = {"id": "good", "blood_group": "O-", "component": "whole_blood", "available_units": 5}
+    zero_with_stale_positive = {
+        "id": "zero", "blood_group": "O-", "component": "whole_blood",
+        "available_units": 0, "units": 9,
+    }
+    reported_zero = {"id": "reported-zero", "blood_group": "O-", "component": "whole_blood",
+                     "reported_units": 0, "quantity": 8}
+    unknown = {"id": "unknown", "blood_group": "O-", "component": "whole_blood",
+               "available_units": "not-a-number", "units": 7}
+    wrong_group = {"id": "group", "blood_group": "O+", "component": "whole_blood", "units": 7}
+    wrong_component = {"id": "component", "blood_group": "O-", "component": "platelets", "units": 7}
+    insufficient = {"id": "small", "blood_group": "O-", "component": "whole_blood", "quantity": 1}
+    records = [good, zero_with_stale_positive, reported_zero, unknown,
+               wrong_group, wrong_component, insufficient]
+    before = [dict(record) for record in records]
+
+    found = match_blood_inventory(records, blood_group="O-", component="whole_blood", required_units=2)
+
+    assert found == [good]
+    assert records == before  # normalization must not mutate caller-owned inventory
+
+
+def test_legacy_quantity_precedence_and_unknown_handling():
+    from app.services.matching import _reported_units
+
+    assert _reported_units({"available_units": 4, "reported_units": 3, "units": 2, "quantity": 1}) == 4
+    assert _reported_units({"reported_units": 4}) == 4
+    assert _reported_units({"units": "2"}) == 2
+    assert _reported_units({"quantity": 3}) == 3
+    assert _reported_units({"available_units": "broken", "units": 5}) is None
+    assert _reported_units({"available_units": None, "reported_units": None}) is None
+    assert _reported_units({"reported_units": 0, "quantity": 8}) == 0
+    assert _reported_units({"units": -2, "quantity": 8}) == -2
+    assert _reported_units({"units": float("nan")}) is None
+    assert _reported_units({"units": float("inf")}) is None
+    assert _reported_units({"units": True}) is None

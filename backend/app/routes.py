@@ -168,15 +168,35 @@ async def get_evidence(evidence_id: str, request: Request,
 
 
 # ------------------------------------------------------------ proposal / approval
-def _items_for(cands: list[Candidate], ids: list[str] | None) -> list[ProposalItem]:
-    pool = [c for c in cands if c.section in (Section.A_ELIGIBLE, Section.B_UNCERTAIN)]
+def _items_for(cands: list[Candidate], ids: list[str] | None, req=None) -> list[ProposalItem]:
+    # Call-list preparation is limited to live inventory evidence that is already scoped to
+    # this request. Explicit IDs must not bypass this gate (the old implementation did).
+    def reviewable(candidate: Candidate) -> bool:
+        return (candidate.section in (Section.A_ELIGIBLE, Section.B_UNCERTAIN)
+                and candidate.source_type == "live"
+                and candidate.blood_group_reported is not None
+                and candidate.component_reported is not None
+                and candidate.match_state.value == "MATCHED_REPORTED"
+                and (req is None or candidate.blood_group_reported == req.blood_group.value)
+                and (req is None or candidate.component_reported == req.component.value))
+
+    pool = [c for c in cands if reviewable(c)]
     if ids is not None:
+        unique_ids = list(dict.fromkeys(ids))
         known = {c.candidate_id: c for c in cands}
-        bad = [i for i in ids if i not in known]
+        bad = [i for i in unique_ids if i not in known]
         if bad:
             raise AppError("UNKNOWN_CANDIDATE", "One or more candidate_ids are not part of this run.",
                            status_code=422)
-        pool = [known[i] for i in dict.fromkeys(ids)]
+        disallowed = [i for i in unique_ids if not reviewable(known[i])]
+        if disallowed:
+            raise AppError(
+                "CANDIDATE_NOT_REVIEWABLE",
+                "Only correctly scoped live inventory records with eligible or uncertain evidence can be added to call-list review.",
+                status_code=422,
+                user_action="Return to the results and select an eligible or uncertain live-stock record.",
+            )
+        pool = [known[i] for i in unique_ids]
     return [ProposalItem(
         candidate_id=c.candidate_id, bank_id=c.bank.bank_id, bank_name=c.bank.name,
         phone=c.bank.phone, section=c.section, evidence_state=c.evidence_state,
@@ -204,7 +224,7 @@ async def create_proposal(run_id: str, body: ProposalCreate, request: Request, r
     run, c = _authorize(request, run_id, x_run_token), _c(request)
     if run.status not in (RunStatus.AWAITING_APPROVAL, RunStatus.COMPLETED):
         raise AppError("RUN_NOT_READY", "Results are not ready for a call list.", status_code=409)
-    items = _items_for(c.store.candidates.get(run_id, []), body.candidate_ids)
+    items = _items_for(c.store.candidates.get(run_id, []), body.candidate_ids, c.store.request_for(run))
     if not items:
         raise AppError("NO_CANDIDATES", "No candidates to put on a call list.", status_code=409,
                        user_action="Try nearby districts or call blood banks directly.")
