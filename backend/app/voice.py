@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import tempfile
 from email import policy
@@ -11,9 +12,9 @@ from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from google import genai
 
 router = APIRouter()
+log = logging.getLogger("voice")
 
 MAX_AUDIO_BYTES = 14 * 1024 * 1024
 TRANSCRIPTION_MODEL = "gemini-3.5-transcribe"
@@ -27,6 +28,9 @@ def _transcribe_with_gemini(
     api_key: str,
 ) -> str:
     """Run Gemini's file-transcription workflow."""
+    # Lazy import keeps the non-AI search API bootable when optional AI deps are absent.
+    from google import genai
+
     client = genai.Client(api_key=api_key)
     uploaded_file = None
     temp_path = None
@@ -175,7 +179,8 @@ async def transcribe(request: Request):
     ):
         language = None
 
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    # Support the canonical AI Studio key name and the Google SDK conventional alias.
+    api_key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
 
     if not api_key:
         return JSONResponse(
@@ -194,8 +199,9 @@ async def transcribe(request: Request):
             api_key,
         )
 
-    except Exception:
-        # Keep provider details and credentials out of client responses.
+    except Exception as exc:
+        # Log only the exception type for diagnostics; never log credentials or request audio.
+        log.warning("Gemini transcription failed (%s)", type(exc).__name__)
         return JSONResponse(
             {
                 "message": (

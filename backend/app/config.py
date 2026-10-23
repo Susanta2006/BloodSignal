@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     geocoder_base_url: str = "https://nominatim.openstreetmap.org/search"
     geocoder_timeout_s: float = Field(2.0, gt=0, le=10)
     geocoder_candidate_limit: int = Field(10, ge=1, le=50)
-    geocoder_time_budget_s: float = Field(3.0, gt=0, le=15)
+    geocoder_time_budget_s: float = Field(8.0, gt=0, le=15)
 
     freshness_hours: int = Field(24, ge=1, le=720)
     max_radius_km: int = Field(100, ge=1, le=500)
