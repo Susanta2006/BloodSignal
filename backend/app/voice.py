@@ -19,7 +19,7 @@ log = logging.getLogger("voice")
 
 MAX_AUDIO_BYTES = 14 * 1024 * 1024
 MAX_INLINE_AUDIO_BYTES = 10 * 1024 * 1024
-TRANSCRIPTION_MODELS = ("gemini-3.5-transcribe")
+TRANSCRIPTION_MODELS = ("gemini-3.5-transcribe",)
 AUDIO_MIME_TYPES = {
     "audio/aac",
     "audio/aiff",
