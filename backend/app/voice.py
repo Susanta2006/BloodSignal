@@ -1,4 +1,5 @@
-"""Voice transcription using server-side Gemini audio understanding."""
+
+"""Voice transcription using server-side Gemini audio transcription."""
 from __future__ import annotations
 
 import asyncio
@@ -18,8 +19,7 @@ router = APIRouter()
 log = logging.getLogger("voice")
 
 MAX_AUDIO_BYTES = 14 * 1024 * 1024
-MAX_INLINE_AUDIO_BYTES = 10 * 1024 * 1024
-TRANSCRIPTION_MODELS = ("gemini-3.5-transcribe",)
+
 AUDIO_MIME_TYPES = {
     "audio/aac",
     "audio/aiff",
@@ -35,8 +35,9 @@ AUDIO_MIME_TYPES = {
     "audio/wav",
     "audio/webm",
 }
+
 AUDIO_MIME_ALIASES = {
-    "audio/mp4": "audio/m4a",  # Common MediaRecorder output on Safari / iOS.
+    "audio/mp4": "audio/m4a",
     "audio/x-m4a": "audio/m4a",
     "audio/x-wav": "audio/wav",
     "audio/wave": "audio/wav",
@@ -45,22 +46,29 @@ AUDIO_MIME_ALIASES = {
 
 
 def _normalize_audio_mime_type(media_type: str) -> str | None:
+    """Normalize and validate an incoming audio MIME type."""
     clean = (media_type or "").split(";", 1)[0].strip().lower()
     clean = AUDIO_MIME_ALIASES.get(clean, clean)
+
     return clean if clean in AUDIO_MIME_TYPES else None
 
 
 def _provider_status_code(error: BaseException) -> int | None:
-    """Read an HTTP status from a provider exception or its wrapped cause."""
+    """Find an HTTP status code in an exception or its wrapped causes."""
     current: BaseException | None = error
     seen: set[int] = set()
+
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        for attr in ("status_code", "statusCode"):
+
+        for attr in ("status_code", "statusCode", "code"):
             value = getattr(current, attr, None)
+
             if isinstance(value, int) and 100 <= value <= 599:
                 return value
+
         current = current.__cause__ or current.__context__
+
     return None
 
 
@@ -71,14 +79,7 @@ def _transcribe_with_gemini(
     language: str | None,
     api_key: str,
 ) -> str:
-    """Transcribe audio through Gemini's general audio endpoint with bounded fallback.
-
-    The dedicated Interactions transcription endpoint was returning repeated 503s in
-    production and kept requests open for over 100 seconds. Gemini's ordinary
-    generate_content audio input supports WebM and common mobile audio formats, so this
-    path uses that endpoint first and tries one alternate model if needed. SDK retries
-    are disabled; the application controls the number of attempts and total latency.
-    """
+    """Transcribe an uploaded audio recording using Gemini Interactions."""
     from google import genai
     from google.genai import types
 
@@ -89,118 +90,104 @@ def _transcribe_with_gemini(
     client = genai.Client(
         api_key=api_key,
         http_options=types.HttpOptions(
-            timeout=12_000,
+            timeout=20_000,
             retry_options=types.HttpRetryOptions(attempts=1),
         ),
     )
-    uploaded_file = None
-    temp_path: str | None = None
 
-    language_hint = (
-        f"The selected language code is {language}. Transcribe in that language and do not translate."
-        if language
-        else "Detect the spoken language automatically and transcribe in the original language; do not translate."
-    )
-    prompt = (
-        "Transcribe the speech in this audio recording faithfully. Return only the transcript, "
-        "without quotes, explanations, summaries, or medical advice. Preserve names, blood groups "
-        "such as O negative, numbers, quantities, and units exactly as spoken. " + language_hint
-    )
+    temp_path: str | None = None
+    uploaded_file = None
 
     try:
-        if len(content) <= MAX_INLINE_AUDIO_BYTES:
-            # Most voice notes are small; avoid a separate Files API round trip.
-            contents: list[object] = [
-                prompt,
-                types.Part.from_bytes(data=content, mime_type=normalized_type),
-            ]
-        else:
-            suffix = Path(filename).suffix[:10] or ".audio"
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_file:
-                temp_file.write(content)
-                temp_path = temp_file.name
-            uploaded_file = client.files.upload(
-                file=temp_path,
-                config={"mime_type": normalized_type},
+        suffix = Path(filename).suffix[:10] or ".audio"
+
+        # The dedicated transcription API uses an uploaded audio file URI.
+        with tempfile.NamedTemporaryFile(
+            suffix=suffix,
+            delete=False,
+        ) as temp_file:
+            temp_file.write(content)
+            temp_path = temp_file.name
+
+        uploaded_file = client.files.upload(
+            file=temp_path,
+            config={"mime_type": normalized_type},
+        )
+
+        request_args: dict = {
+            "model": "gemini-3.5-transcribe",
+            "input": [
+                {
+                    "type": "audio",
+                    "uri": uploaded_file.uri,
+                    "mime_type": normalized_type,
+                }
+            ],
+        }
+
+        # Only send an explicit language when one was supplied.
+        # Confirm supported language-code formats for your SDK/model version.
+        if language:
+            request_args["generation_config"] = {
+                "transcription_config": {
+                    "language_codes": [language],
+                }
+            }
+
+        interaction = client.interactions.create(**request_args)
+        transcript = (
+            getattr(interaction, "output_text", None) or ""
+        ).strip()
+
+        if not transcript:
+            log.warning(
+                "Gemini returned an empty transcript (model=%s)",
+                "gemini-3.5-transcribe",
             )
-            contents = [prompt, uploaded_file]
+            raise RuntimeError("Gemini returned no transcript")
 
-        last_error: Exception | None = None
-        for model in TRANSCRIPTION_MODELS:
-            try:
-                response = client.models.generate_content(
-                    model=model,
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        temperature=0,
-                        max_output_tokens=4096,
-                    ),
-                )
-                transcript = (getattr(response, "text", None) or "").strip()
+        return transcript
 
-                # Gemini 3.5 Transcribe may return the transcript in
-                # an audio_transcription response part instead of response.text.
-                if not transcript:
-                    for candidate in getattr(response, "candidates", None) or []:
-                        candidate_content = getattr(candidate, "content", None)
-                        for part in getattr(candidate_content, "parts", None) or []:
-                            audio_transcription = getattr(part, "audio_transcription", None)
-                            if audio_transcription is not None:
-                                transcript = (
-                                    getattr(audio_transcription, "text", None) or ""
-                                ).strip()
-                                if transcript:
-                                    break
-                        if transcript:
-                            break
-                
-                if transcript:
-                    return transcript
-                
-                log.warning(
-                    "Gemini audio transcription returned no transcript (model=%s)",
-                    model,
-                )
-            except Exception as exc:
-                last_error = exc
-                status = _provider_status_code(exc)
-                log.warning(
-                    "Gemini audio model failed (model=%s, error=%s, status=%s)",
-                    model,
-                    type(exc).__name__,
-                    status,
-                )
-                if status in (401, 403):
-                    break
+    except Exception:
+        # Keep provider diagnostics on the server. Never log audio or API keys.
+        log.exception("Gemini transcription request failed")
+        raise
 
-        if last_error is not None:
-            raise RuntimeError("Gemini audio transcription failed") from last_error
-        raise RuntimeError("Gemini returned no transcript")
     finally:
         if temp_path:
             try:
                 os.unlink(temp_path)
             except OSError:
-                pass
+                log.debug("Temporary audio file cleanup failed")
+
         if uploaded_file is not None:
             try:
                 client.files.delete(name=uploaded_file.name)
             except Exception as exc:
-                log.debug("Gemini audio cleanup failed (%s)", type(exc).__name__)
+                log.warning(
+                    "Gemini uploaded-file cleanup failed (%s)",
+                    type(exc).__name__,
+                )
+
         try:
             client.close()
         except Exception as exc:
-            log.debug("Gemini client cleanup failed (%s)", type(exc).__name__)
+            log.debug(
+                "Gemini client cleanup failed (%s)",
+                type(exc).__name__,
+            )
 
 
 @router.post("/api/transcribe")
 async def transcribe(request: Request):
+    """Receive a multipart audio upload and return its transcript."""
     content_type = request.headers.get("content-type", "")
     boundary = None
 
     if content_type.lower().startswith("multipart/form-data"):
         for item in content_type.split(";")[1:]:
             name, sep, value = item.strip().partition("=")
+
             if sep and name.lower() == "boundary":
                 boundary = value.strip().strip('"')
                 break
@@ -209,29 +196,44 @@ async def transcribe(request: Request):
         return JSONResponse(
             {"message": "The voice note could not be read."},
             status_code=400,
+            headers={"Cache-Control": "no-store"},
         )
 
     raw = await request.body()
 
-    message = BytesParser(policy=policy.default).parsebytes(
-        b"Content-Type: "
-        + content_type.encode("ascii", "ignore")
-        + b"\r\nMIME-Version: 1.0\r\n\r\n"
-        + raw
-    )
-
-    content = None
-    filename = "voice-note.webm"
-    media_type = ""
-    language = None
+    # Reject oversized requests before parsing their multipart contents.
+    # Multipart framing adds a small amount of overhead beyond the audio bytes.
+    if len(raw) > MAX_AUDIO_BYTES + 1024 * 1024:
+        return JSONResponse(
+            {
+                "message": (
+                    "That recording is too large. Try a shorter voice note."
+                )
+            },
+            status_code=413,
+            headers={"Cache-Control": "no-store"},
+        )
 
     try:
+        message = BytesParser(policy=policy.default).parsebytes(
+            b"Content-Type: "
+            + content_type.encode("ascii", "ignore")
+            + b"\r\nMIME-Version: 1.0\r\n\r\n"
+            + raw
+        )
+
+        content: bytes | None = None
+        filename = "voice-note.webm"
+        media_type = ""
+        language: str | None = None
+
         for part in message.iter_parts():
             if part.get_content_disposition() != "form-data":
                 continue
 
             field_name = part.get_param(
-                "name", header="content-disposition"
+                "name",
+                header="content-disposition",
             )
 
             if field_name == "file":
@@ -246,38 +248,42 @@ async def transcribe(request: Request):
         return JSONResponse(
             {"message": "The voice note could not be read."},
             status_code=400,
+            headers={"Cache-Control": "no-store"},
         )
 
-    if content is None or not content:
+    if not content:
         return JSONResponse(
             {"message": "Choose a voice note before transcribing."},
             status_code=400,
-        )
-
-    normalized_media_type = _normalize_audio_mime_type(media_type)
-    if not normalized_media_type:
-        return JSONResponse(
-            {
-                "message": (
-                    "This recording format is not supported. Try recording again in your browser."
-                )
-            },
-            status_code=415,
             headers={"Cache-Control": "no-store"},
         )
-    media_type = normalized_media_type
 
     if len(content) > MAX_AUDIO_BYTES:
         return JSONResponse(
             {
                 "message": (
-                    "That recording is too large. "
-                    "Try a shorter voice note."
+                    "That recording is too large. Try a shorter voice note."
                 )
             },
             status_code=413,
             headers={"Cache-Control": "no-store"},
         )
+
+    normalized_media_type = _normalize_audio_mime_type(media_type)
+
+    if not normalized_media_type:
+        return JSONResponse(
+            {
+                "message": (
+                    "This recording format is not supported. "
+                    "Try recording again in your browser."
+                )
+            },
+            status_code=415,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    media_type = normalized_media_type
 
     if language and (
         len(language) > 16
@@ -295,7 +301,7 @@ async def transcribe(request: Request):
         )
 
     try:
-        text = await asyncio.to_thread(
+        transcript = await asyncio.to_thread(
             _transcribe_with_gemini,
             content,
             filename,
@@ -305,29 +311,50 @@ async def transcribe(request: Request):
         )
 
     except Exception as exc:
-        # Log only safe diagnostics; never log credentials or request audio.
         provider_status = _provider_status_code(exc)
+
+        # Log safe diagnostics. The helper logs the provider traceback.
         log.warning(
-            "Gemini transcription failed (error=%s, status=%s)",
+            "Transcription endpoint failed (error=%s, provider_status=%s)",
             type(exc).__name__,
             provider_status,
         )
+
         if provider_status in (401, 403):
-            message = "Voice assistance is not configured correctly. Check the Gemini API key and API access."
+            message = (
+                "Voice assistance is not configured correctly. "
+                "Check the Gemini API key and API access."
+            )
             status_code = 503
+
         elif provider_status == 429:
-            message = "Gemini is busy or the API quota has been reached. Try again shortly, or type your request."
+            message = (
+                "Gemini is busy or the API quota has been reached. "
+                "Try again shortly, or type your request."
+            )
             status_code = 429
-        else:
-            message = "Voice transcription is temporarily unavailable. Try again shortly or type your request."
+
+        elif provider_status == 503:
+            message = (
+                "The transcription service is temporarily unavailable. "
+                "Try again shortly or type your request."
+            )
             status_code = 503
+
+        else:
+            message = (
+                "Voice transcription is temporarily unavailable. "
+                "Try again shortly or type your request."
+            )
+            status_code = 503
+
         return JSONResponse(
             {"message": message},
             status_code=status_code,
             headers={"Cache-Control": "no-store"},
         )
 
-    if not text:
+    if not transcript:
         return JSONResponse(
             {
                 "message": (
@@ -340,6 +367,6 @@ async def transcribe(request: Request):
         )
 
     return JSONResponse(
-        {"text": text},
+        {"text": transcript},
         headers={"Cache-Control": "no-store"},
     )
