@@ -48,9 +48,12 @@ def add_distance_metadata(
 ) -> None:
     for candidate in candidates:
         bank = candidate.bank
+        # Locality-centre coordinates are useful map hints, but they are not the
+        # individual blood bank's location and must not be used for per-facility distance.
         destination = (
             (bank.latitude, bank.longitude)
             if valid_coordinate_pair(bank.latitude, bank.longitude)
+            and bank.location_precision != "LOCALITY"
             else None
         )
         distance = haversine_distance_km(origin, destination)
@@ -70,6 +73,8 @@ def add_distance_metadata(
                     if location_mode == "manual"
                     else "Exact distance is unavailable because device coordinates were not shared."
                 )
+            elif bank.location_precision == "LOCALITY":
+                reason = "Facility-specific distance is unavailable because only town/district-centre coordinates are available."
             else:
                 reason = "Exact distance is unavailable because this facility has no valid coordinates."
             candidate.distance_unavailable_reason = reason
