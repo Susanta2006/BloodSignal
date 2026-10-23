@@ -137,9 +137,30 @@ def _transcribe_with_gemini(
                     ),
                 )
                 transcript = (getattr(response, "text", None) or "").strip()
+
+                # Gemini 3.5 Transcribe may return the transcript in
+                # an audio_transcription response part instead of response.text.
+                if not transcript:
+                    for candidate in getattr(response, "candidates", None) or []:
+                        candidate_content = getattr(candidate, "content", None)
+                        for part in getattr(candidate_content, "parts", None) or []:
+                            audio_transcription = getattr(part, "audio_transcription", None)
+                            if audio_transcription is not None:
+                                transcript = (
+                                    getattr(audio_transcription, "text", None) or ""
+                                ).strip()
+                                if transcript:
+                                    break
+                        if transcript:
+                            break
+                
                 if transcript:
                     return transcript
-                log.warning("Gemini audio transcription returned empty text (model=%s)", model)
+                
+                log.warning(
+                    "Gemini audio transcription returned no transcript (model=%s)",
+                    model,
+                )
             except Exception as exc:
                 last_error = exc
                 status = _provider_status_code(exc)
