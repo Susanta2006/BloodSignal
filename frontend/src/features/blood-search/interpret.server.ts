@@ -100,7 +100,8 @@ export async function suggestRequestFields(input: {
   imageBase64?: string | undefined;
   imageMimeType?: "image/jpeg" | "image/png" | "image/webp" | undefined;
 }): Promise<SuggestedFields> {
-  const apiKey = process.env["GEMINI_API_KEY"];
+  // GEMINI_API_KEY is the documented project setting; GOOGLE_API_KEY is a supported alias.
+  const apiKey = process.env["GEMINI_API_KEY"] || process.env["GOOGLE_API_KEY"];
 
   if (!apiKey) {
     throw new Error(
