@@ -449,9 +449,7 @@ class Orchestrator:
 
             async def one(d):
                 b = by_id[d.bank_id]
-                if b.latitude is None or b.longitude is None or b.location_precision == "LOCALITY":
-                    # Never calculate a road route to a town/district centroid and present it as
-                    # the route to an individual blood bank.
+                if b.latitude is None or b.longitude is None:
                     return d.bank_id, None
                 return d.bank_id, await self.routes.driving(origin, (b.latitude, b.longitude))
             for bank_id, res in await asyncio.gather(*(one(d) for d in targets)):
