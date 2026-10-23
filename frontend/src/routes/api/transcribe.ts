@@ -28,7 +28,16 @@ export const Route = createFileRoute("/api/transcribe")({
         if (!upload.type.startsWith("audio/"))
           return jsonError("Choose an audio recording, such as a voice note.", 415);
 
-        const backendUrl = process.env["BACKEND_INTERNAL_URL"] || "http://127.0.0.1:8000";
+        const configuredBackendUrl = process.env["BACKEND_INTERNAL_URL"]?.trim();
+        const backendUrl = configuredBackendUrl || (
+          process.env["NODE_ENV"] === "production" ? "" : "http://127.0.0.1:8000"
+        );
+        if (!backendUrl) {
+          return jsonError(
+            "Voice assistance is not connected to the backend. Set BACKEND_INTERNAL_URL in the frontend deployment.",
+            503,
+          );
+        }
         const clientIp =
           request.headers.get("cf-connecting-ip") || request.headers.get("x-real-ip");
         const gatewayForm = new FormData();
@@ -47,12 +56,13 @@ export const Route = createFileRoute("/api/transcribe")({
                 }
               : {},
             body: gatewayForm,
+            signal: AbortSignal.timeout(45_000),
           });
-        } catch {
-          return jsonError(
-            "Voice assistance could not be reached. You can type your request instead.",
-            503,
-          );
+        } catch (error) {
+          const message = error instanceof Error && error.name === "TimeoutError"
+            ? "Voice transcription took too long. Try a shorter recording or type your request."
+            : "Voice assistance could not be reached. You can type your request instead.";
+          return jsonError(message, 503);
         }
 
         const body = await upstream.text();
