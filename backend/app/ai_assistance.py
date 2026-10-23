@@ -196,6 +196,7 @@ async def suggest_fields(body: SuggestFieldsRequest):
             api_key,
         )
     except Exception as exc:
+        print(exc)
         provider_status = _provider_status_code(exc)
         if provider_status in (401, 403):
             message = "AI assistance is not configured correctly. Check the Gemini API key and API access."
@@ -203,6 +204,7 @@ async def suggest_fields(body: SuggestFieldsRequest):
         elif provider_status == 429:
             message = "Gemini is busy or the API quota has been reached. Please try again shortly."
             response_status = 429
+            
         else:
             message = "AI assistance is temporarily unavailable. Your search form is still available."
             response_status = 503
