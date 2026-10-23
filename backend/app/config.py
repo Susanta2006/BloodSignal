@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     # e-RaktKosh bulk endpoint. Source timestamps are timezone-naive; default to India time.
     # An empty deployment variable also falls back to Asia/Kolkata to avoid losing timestamps.
     eraktkosh_source_timezone: str = "Asia/Kolkata"
+    # Optional: send the e-RaktKosh request through your own relay running in an Indian region
+    # (see relay/README.md). Empty = call the official endpoint directly.
+    eraktkosh_relay_url: str = ""
+    eraktkosh_relay_secret: SecretStr = SecretStr("")
 
     # Opt-in Nominatim geocoding. Never required for stock-search success.
     geocoder_enabled: bool = False
@@ -83,6 +87,16 @@ class Settings(BaseSettings):
         # Demo is the local-dev default. In production it must be chosen explicitly, never inherited.
         if self.app_env.lower() == "production" and "stock_source_mode" not in self.model_fields_set:
             self.stock_source_mode = "live"
+        if self.eraktkosh_relay_url:
+            if not self.eraktkosh_relay_url.startswith("https://"):
+                raise ValueError("ERAKTKOSH_RELAY_URL must start with https://")
+            if len(self.eraktkosh_relay_secret.get_secret_value()) < 16:
+                raise ValueError("ERAKTKOSH_RELAY_SECRET (16+ chars) is required when ERAKTKOSH_RELAY_URL is set")
+        if (self.app_env.lower() == "production"
+                and len(self.token_hash_secret.get_secret_value().encode("utf-8")) < 32):
+            # routes._secret() falls back to a publicly visible development secret when this is
+            # empty, which would make run tokens predictable. Fail at startup instead.
+            raise ValueError("TOKEN_HASH_SECRET must contain at least 32 bytes when APP_ENV=production")
         if self.ranking_freshness_weight + self.ranking_quantity_weight + self.ranking_distance_weight <= 0:
             raise ValueError("At least one ranking weight must be greater than zero")
         return self

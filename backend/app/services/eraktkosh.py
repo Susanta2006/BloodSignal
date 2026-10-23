@@ -198,9 +198,14 @@ class ERaktKoshAdapter:
                  transport: httpx.AsyncBaseTransport | None = None,
                  sleep: Callable[[float], Any] = asyncio.sleep,
                  geocoder: NominatimGeocoder | None = None, geocoder_candidate_limit: int = 10,
-                 geocoder_time_budget_s: float = 3.0):
+                 geocoder_time_budget_s: float = 3.0,
+                 relay_url: str = "", relay_secret: str = ""):
         # Keep the endpoint fixed to the verified host/path. Do not allow arbitrary proxy URLs.
         self._base = OFFICIAL_URL
+        # Optional operator-owned relay (fixed at startup from settings, never from user input).
+        # It must run the same fixed request from an allowed network region.
+        self._relay_url = relay_url.strip()
+        self._relay_secret = relay_secret
         self._timeout = timeout_s
         self._clock = clock
         self._transport = transport
@@ -294,6 +299,10 @@ class ERaktKoshAdapter:
     async def _fetch_parse(self, state_code: str, component_id: str, component_name: str) -> SourceResult:
         params = {"stateCode": state_code, "componentId": component_id}
         headers = {"Accept": "application/json", "User-Agent": "BloodSignal/1.0 (read-only hackathon availability search)"}
+        target = self._base
+        if self._relay_url:
+            target = self._relay_url
+            headers["X-Relay-Secret"] = self._relay_secret
         remaining = self._retry_after_until - self._retry_after_clock()
         if remaining > 0:
             raise SourceRateLimited(f"e-RaktKosh retry window active; wait about {int(remaining) + 1}s")
@@ -301,7 +310,7 @@ class ERaktKoshAdapter:
             async with self._semaphore:
                 async with httpx.AsyncClient(timeout=httpx.Timeout(self._timeout, connect=15.0),
                                              transport=self._transport, follow_redirects=False) as client:
-                    response = await client.get(self._base, params=params, headers=headers)
+                    response = await client.get(target, params=params, headers=headers)
         except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
             log.warning(
                 "e-RaktKosh request failed: error_type=%s state_code=%s component_id=%s",

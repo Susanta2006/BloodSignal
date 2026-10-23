@@ -56,6 +56,8 @@ def build_container(settings: Settings, *, stock: StockSourceAdapter | None = No
         stock = (DemoStockAdapter(clock) if not live else ERaktKoshAdapter(
             timeout_s=settings.stock_source_timeout_s,
             source_timezone=settings.eraktkosh_source_timezone or "Asia/Kolkata",
+            relay_url=settings.eraktkosh_relay_url,
+            relay_secret=settings.eraktkosh_relay_secret.get_secret_value(),
             clock=clock,
             geocoder=NominatimGeocoder(contact=settings.geocoder_contact,
                                        base_url=settings.geocoder_base_url,
