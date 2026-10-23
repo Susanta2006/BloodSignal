@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import os
 from typing import Literal
 
 from pydantic import Field, SecretStr, model_validator
@@ -28,6 +29,10 @@ class Settings(BaseSettings):
     datagov_fallback_to_demo: bool = False
 
     google_maps_server_key: SecretStr = SecretStr("")
+
+    # Gemini is optional; these settings also allow the backend .env file to be used.
+    gemini_api_key: SecretStr = SecretStr("")
+    google_api_key: SecretStr = SecretStr("")
 
     # demo = synthetic fixtures only. live = e-RaktKosh only. They never mix or fall back.
     stock_source_mode: Literal["demo", "live"] = "live"
@@ -113,3 +118,26 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings(_env_file=".env")
+
+
+def get_gemini_api_key() -> str:
+    """Read Gemini credentials from deployment env vars or the backend .env file.
+
+    Settings reads .env without exporting values into os.environ, so AI endpoints must
+    not rely on os.environ alone when the application is run locally.
+    """
+    # Environment variables are checked directly first so deployment secret changes are
+    # honored even when the settings object has already been cached.
+    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+
+    try:
+        settings = get_settings()
+    except Exception:
+        return ""
+    return (
+        settings.gemini_api_key.get_secret_value().strip()
+        or settings.google_api_key.get_secret_value().strip()
+    )
