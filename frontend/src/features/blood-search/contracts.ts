@@ -34,6 +34,10 @@ const manualLocationSchema = z.object({
 
 const deviceLocationSchema = z.object({
   mode: z.literal("device"),
+  // GPS supplies the origin for distance calculations; the selected search area still
+  // determines which state's inventory is queried and which district is filtered.
+  district: z.string().trim().min(2, "Choose a district or city.").max(120),
+  state: z.string().trim().min(2, "Choose a state.").max(120),
   latitude: z.number().finite().min(-90).max(90),
   longitude: z.number().finite().min(-180).max(180),
   country: z.literal("IN"),
@@ -67,6 +71,12 @@ export const searchRequestSchema = z.object({
 
 export type SearchRequest = z.infer<typeof searchRequestSchema>;
 
+// Before submit, a GPS origin may be ready before the user selects an inventory area.
+// buildSearchRequest combines these coordinates with the selected form state and district.
+export type LocationSelection =
+  | z.infer<typeof manualLocationSchema>
+  | Omit<z.infer<typeof deviceLocationSchema>, "district" | "state">;
+
 export type SearchFormValues = {
   blood_group: (typeof bloodGroups)[number];
   component: (typeof components)[number];
@@ -87,16 +97,20 @@ export const initialSearchForm: SearchFormValues = {
 
 export function buildSearchRequest(
   values: SearchFormValues,
-  location: SearchRequest["location"],
+  location: LocationSelection,
   includeNearbyDistricts: boolean,
 ): SearchRequest {
+  const district = values.district.trim();
+  const state = values.state.trim();
   return searchRequestSchema.parse({
     blood_group: values.blood_group,
     component: values.component,
     quantity: Number(values.quantity),
     quantity_unit: values.quantity_unit,
     location:
-      location.mode === "device" ? { ...location, location_consent: true as const } : location,
+      location.mode === "device"
+        ? { ...location, district, state, location_consent: true as const }
+        : { mode: "manual", district, state, country: "IN" as const },
     search_options: { include_nearby_districts: includeNearbyDistricts },
   });
 }
