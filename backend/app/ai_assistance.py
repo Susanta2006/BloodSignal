@@ -133,7 +133,7 @@ def _suggest_with_gemini(text: str | None, image: bytes | None, mime_type: str |
                     contents=contents,
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
-                        response_schema=SuggestedFields,
+                       # response_schema=SuggestedFields,
                         temperature=0,
                         max_output_tokens=512,
                     ),
@@ -153,10 +153,12 @@ def _suggest_with_gemini(text: str | None, image: bytes | None, mime_type: str |
                 last_error = exc
                 status = _provider_status_code(exc)
                 log.warning(
-                    "Gemini field extraction model failed (model=%s, error=%s, status=%s)",
+                    "Gemini field extraction model failed "
+                    "(model=%s, error=%s, status=%s, details=%s)",
                     model,
                     type(exc).__name__,
                     status,
+                    str(exc)[:1500],
                 )
                 if status in (401, 403):
                     break
