@@ -75,8 +75,15 @@ export async function proxyBackendRequest(
     const upstream = await fetch(upstreamUrl, init);
     const responseHeaders = new Headers();
     upstream.headers.forEach((value, name) => {
-      if (!HOP_BY_HOP_HEADERS.has(name.toLowerCase()) && name.toLowerCase() !== "set-cookie")
+      const lowerName = name.toLowerCase();
+
+      if (
+        !HOP_BY_HOP_HEADERS.has(lowerName) &&
+        lowerName !== "set-cookie" &&
+        lowerName !== "content-encoding"
+      ) {
         responseHeaders.set(name, value);
+      }
     });
     return new Response(upstream.body, {
       status: upstream.status,
