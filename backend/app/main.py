@@ -23,6 +23,7 @@ from app.orchestrator import Orchestrator
 from app.provider import ModelProvider, build_provider
 from app.routes import router
 from app.voice import router as voice_router
+from app.ai_assistance import router as ai_assistance_router
 from app.schemas import AppError, new_id, utcnow
 from app.services.directory import (BankDirectory, DataGovDirectory, DemoDirectory, FallbackDirectory,
                                     GooglePlacesDirectory, UnconfiguredDirectory)
@@ -141,7 +142,7 @@ class RequestBodyLimitMiddleware:
             await self.app(scope, receive, send)
             return
         path = scope.get("path", "")
-        limit = self.upload_limit if path == "/api/transcribe" else self.regular_limit
+        limit = self.upload_limit if path in {"/api/transcribe", "/api/suggest-fields"} else self.regular_limit
         total = 0
         response_started = False
 
@@ -214,7 +215,8 @@ def create_app(settings: Settings | None = None, container: Container | None = N
         start = time.monotonic()
         too_large = request.headers.get("content-length", "")
         body_limit = (settings.max_upload_body_bytes
-                      if request.url.path == "/api/transcribe" else settings.max_request_body_bytes)
+                      if request.url.path in {"/api/transcribe", "/api/suggest-fields"}
+                      else settings.max_request_body_bytes)
         try:
             body_size = int(too_large) if too_large else 0
         except ValueError:
@@ -305,6 +307,7 @@ def create_app(settings: Settings | None = None, container: Container | None = N
 
     app.include_router(router)
     app.include_router(voice_router)
+    app.include_router(ai_assistance_router)
     app.include_router(inventory_router)
     app.add_middleware(RequestBodyLimitMiddleware,
                        regular_limit=settings.max_request_body_bytes,

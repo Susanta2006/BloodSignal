@@ -24,12 +24,14 @@ def candidate(
     quantity=2,
     latitude=24.80,
     longitude=93.94,
+    location_precision=None,
 ):
     bank = BloodBank(
         bank_id=name.casefold().replace(" ", "-"),
         name=name,
         latitude=latitude,
         longitude=longitude,
+        location_precision=location_precision,
         source_type="demo" if source_type == "demo" else "live",
     )
     now = utcnow()
@@ -185,3 +187,41 @@ def test_ranking_function_rejects_all_zero_weight_configuration(weights):
     item = candidate("One")
     with pytest.raises(ValueError, match="At least one ranking weight"):
         rank([item], **weights)
+
+
+def test_locality_centre_coordinates_are_not_used_as_facility_distance():
+    approximate = candidate(
+        "Facility with locality-only coordinates",
+        latitude=24.8,
+        longitude=93.94,
+        location_precision="LOCALITY",
+    )
+
+    add_distance_metadata([approximate], origin=(24.9, 93.95), location_mode="device")
+
+    assert approximate.distance_km is None
+    assert approximate.distance_type is None
+    assert "town/district-centre" in (approximate.distance_unavailable_reason or "")
+
+
+def test_distinct_facilities_with_identical_geocoded_coordinates_do_not_show_same_distance():
+    first = candidate("Bank One", latitude=24.8, longitude=93.94, location_precision="FACILITY")
+    second = candidate("Bank Two", latitude=24.8, longitude=93.94, location_precision="FACILITY")
+
+    add_distance_metadata([first, second], origin=(24.9, 93.95), location_mode="device")
+
+    assert first.distance_km is None
+    assert second.distance_km is None
+    assert "share the same coordinates" in (first.distance_unavailable_reason or "")
+    assert "share the same coordinates" in (second.distance_unavailable_reason or "")
+
+
+def test_distinct_facilities_with_distinct_coordinates_get_independent_distances():
+    first = candidate("Bank One", latitude=24.801, longitude=93.941, location_precision="FACILITY")
+    second = candidate("Bank Two", latitude=24.9, longitude=93.99, location_precision="FACILITY")
+
+    add_distance_metadata([first, second], origin=(24.8, 93.94), location_mode="device")
+
+    assert first.distance_km is not None
+    assert second.distance_km is not None
+    assert first.distance_km != second.distance_km

@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     app_env: str = "local"
     log_level: str = "INFO"
-    frontend_origin: str = "https://bloodsignal.vercel.app"
+    frontend_origin: str = "http://localhost:5173"
 
     # Directory and inventory are independent providers.
     directory_source_mode: Literal["demo", "datagov", "google_places"] = "demo"
