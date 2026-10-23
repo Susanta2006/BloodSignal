@@ -59,12 +59,7 @@ import {
 } from "@/features/blood-search/contracts";
 import { evidenceState } from "@/features/blood-search/evidence";
 import { isConfirmedCandidate, isReviewableCandidate } from "@/features/blood-search/eligibility";
-import {
-  candidateDistanceKm,
-  getFacilityCoordinates,
-  getFacilityLocationNote,
-  getFacilityLocationPrecision,
-} from "@/features/blood-search/distance";
+import { haversineDistanceKm } from "@/features/blood-search/distance";
 import { componentOptions, componentDisplayName, eraktkoshStates } from "@/features/blood-search/eraktkosh-catalog";
 import { districtsByState, nearbyDistrictSuggestions } from "@/features/blood-search/district-catalog";
 import { BloodBankMap, type FacilityMapItem } from "@/features/blood-search/BloodBankMap";
@@ -163,6 +158,77 @@ function searchErrorMessage(error: unknown, fallback: string): string {
   return error instanceof SearchApiError && error.correlationId
     ? `${error.message} Reference ID: ${error.correlationId}`
     : error.message;
+}
+
+function numericCoordinate(value: unknown): number | null {
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  if (typeof value === "string" && !value.trim()) return null;
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function getFacilityCoordinates(
+  candidate: Candidate,
+): { latitude: number; longitude: number } | null {
+  const nestedLocation = candidate["location"];
+  const locationRecord =
+    nestedLocation && typeof nestedLocation === "object"
+      ? (nestedLocation as Record<string, unknown>)
+      : undefined;
+  const nestedBank = candidate["bank"];
+  const bankRecord = nestedBank && typeof nestedBank === "object"
+    ? (nestedBank as Record<string, unknown>) : undefined;
+  const coordinates = candidate["coordinates"];
+  const coordinateRecord =
+    coordinates && typeof coordinates === "object"
+      ? (coordinates as Record<string, unknown>)
+      : undefined;
+
+  const latitude = numericCoordinate(
+    candidate["latitude"] ??
+      bankRecord?.["latitude"] ??
+      candidate["lat"] ??
+      candidate["location_latitude"] ??
+      locationRecord?.["latitude"] ??
+      locationRecord?.["lat"] ??
+      coordinateRecord?.["latitude"] ??
+      coordinateRecord?.["lat"],
+  );
+  const longitude = numericCoordinate(
+    candidate["longitude"] ??
+      bankRecord?.["longitude"] ??
+      candidate["lng"] ??
+      candidate["lon"] ??
+      candidate["location_longitude"] ??
+      locationRecord?.["longitude"] ??
+      locationRecord?.["lng"] ??
+      locationRecord?.["lon"] ??
+      coordinateRecord?.["longitude"] ??
+      coordinateRecord?.["lng"] ??
+      coordinateRecord?.["lon"],
+  );
+
+  if (
+    latitude === null ||
+    longitude === null ||
+    latitude < -90 ||
+    latitude > 90 ||
+    longitude < -180 ||
+    longitude > 180
+  )
+    return null;
+
+  return { latitude, longitude };
+}
+
+function candidateDistanceKm(
+  candidate: Candidate,
+  origin: { latitude: number; longitude: number } | null,
+): number | null {
+  const reported = candidate["distance_km"];
+  if (typeof reported === "number" && Number.isFinite(reported) && reported >= 0) return reported;
+  if (!origin) return null;
+  return haversineDistanceKm(origin, getFacilityCoordinates(candidate));
 }
 
 function componentLabel(value: string): string {
@@ -462,14 +528,7 @@ function BloodSearchPage() {
             body: form,
             cache: "no-store",
           });
-          let body: { text?: unknown; message?: unknown };
-          try {
-            body = (await response.json()) as { text?: unknown; message?: unknown };
-          } catch {
-            throw new Error(
-              "Voice transcription returned an unreadable response. Check that the backend is deployed and try again.",
-            );
-          }
+          const body = (await response.json()) as { text?: unknown; message?: unknown };
           if (!response.ok) {
             throw new Error(
               typeof body.message === "string"
@@ -597,8 +656,9 @@ function BloodSearchPage() {
           ...(address ? { address } : {}),
           latitude: coordinates.latitude,
           longitude: coordinates.longitude,
-          ...(getFacilityLocationPrecision(candidate) ? { location_precision: getFacilityLocationPrecision(candidate)! } : {}),
-          ...(getFacilityLocationNote(candidate) ? { location_note: getFacilityLocationNote(candidate)! } : {}),
+          ...(candidate["location_precision"] === "LOCALITY" || candidate["location_precision"] === "FACILITY"
+            ? { location_precision: candidate["location_precision"] as "LOCALITY" | "FACILITY" } : {}),
+          ...(label(candidate["location_note"]) ? { location_note: label(candidate["location_note"]) } : {}),
         },
       ];
     });
@@ -1229,15 +1289,9 @@ function BloodSearchPage() {
                     : deviceLocationStatus === "requesting"
                       ? "Requesting device location… Your browser may ask for permission."
                       : deviceLocationStatus === "error"
-                        ? "Device location unavailable. On a computer, allow location access for this site and enable your operating system's Location Services. You can still search by state and district, but personal distance requires your location and verified facility coordinates."
+                        ? "Device location unavailable. Enter the state and district below; distance will be shown only when valid coordinates are available."
                         : "Device location is requested automatically when this page opens."}
                 </p>
-                {deviceLocationStatus === "error" ? (
-                  <Button type="button" size="sm" variant="outline" onClick={requestDeviceLocation}>
-                    <LocateFixed className="mr-2 size-4" aria-hidden="true" />
-                    Try device location again
-                  </Button>
-                ) : null}
                 <div className="grid gap-3 sm:grid-cols-2">
                     <div>
                       <label htmlFor="state" className="mb-1.5 block text-xs font-medium">
@@ -1679,12 +1733,9 @@ function BloodSearchPage() {
                             candidate["quantity_unit_reported"] ?? stock["quantity_unit"],
                           );
                           const coordinates = getFacilityCoordinates(candidate);
-                          const destinationCoordinates = getFacilityLocationPrecision(candidate) === "LOCALITY"
-                            ? null
-                            : coordinates;
                           const facilityDestination = {
                             name,
-                            ...(destinationCoordinates ?? {}),
+                            ...(coordinates ?? {}),
                             ...(address ? { address } : {}),
                           };
                           const directionsUrl = syntheticFacility
@@ -1834,11 +1885,7 @@ function BloodSearchPage() {
                                     className="text-xs text-muted-foreground"
                                     title={label(candidate["distance_unavailable_reason"])}
                                   >
-                                    {!sharedDeviceOrigin
-                                      ? "Share device location to calculate distance"
-                                      : getFacilityLocationPrecision(candidate) === "LOCALITY"
-                                        ? "Only town/district coordinates available; facility distance unknown"
-                                        : "Facility coordinates unavailable"}
+                                    {sharedDeviceOrigin ? "Facility coordinates unavailable" : "Share device location to calculate distance"}
                                   </span>
                                 )}
                               </td>
@@ -1871,10 +1918,10 @@ function BloodSearchPage() {
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     className="inline-flex min-h-9 items-center gap-1 rounded-sm border border-input px-3 py-2 text-xs font-semibold hover:bg-accent"
-                                    aria-label={destinationCoordinates ? "Get " + travelMode + " directions to " + name : "Find " + name + " on Google Maps"}
+                                    aria-label={coordinates ? "Get " + travelMode + " directions to " + name : "Find " + name + " on Google Maps"}
                                   >
                                     <Navigation className="size-3.5" aria-hidden="true" />
-                                    {destinationCoordinates ? "Get directions" : "Find on Google Maps"}
+                                    {coordinates ? "Get directions" : "Find on Google Maps"}
                                   </a>
                                 ) : (
                                   <span className="text-xs text-muted-foreground">
@@ -1916,11 +1963,8 @@ function BloodSearchPage() {
                       const sourceUpdate = label(candidate["source_updated_at"] ?? stock["source_updated_at"] ?? candidate["source_updated_at_raw"] ?? stock["source_updated_at_raw"]);
                       const retrieved = label(candidate["retrieved_at"] ?? candidate["retrieval_time"]);
                       const coordinates = getFacilityCoordinates(candidate);
-                      const destinationCoordinates = getFacilityLocationPrecision(candidate) === "LOCALITY"
-                        ? null
-                        : coordinates;
                       const directionsUrl = syntheticFacility ? null : buildDirectionsUrl(
-                        { name, ...(destinationCoordinates ?? {}), ...(address ? { address } : {}) },
+                        { name, ...(coordinates ?? {}), ...(address ? { address } : {}) },
                         travelMode,
                         lastPayload?.location.mode === "device"
                           ? `${lastPayload.location.latitude},${lastPayload.location.longitude}`
@@ -1957,7 +2001,7 @@ function BloodSearchPage() {
                             <div><dt className="text-muted-foreground">Requested</dt><dd>{lastPayload ? `${lastPayload.blood_group} · ${componentLabel(lastPayload.component)} · ${lastPayload.quantity} ${lastPayload.quantity_unit}` : "Not available"}</dd></div>
                             <div><dt className="text-muted-foreground">Reported stock</dt><dd>{reportedGroup || "Group not stated"} · {reportedComponent ? componentLabel(reportedComponent) : "Component not stated"} · {typeof reportedQuantity === "number" ? `${reportedQuantity} ${reportedUnit || "units"}` : "Quantity not reported"}</dd></div>
                             <div><dt className="text-muted-foreground">Source updated</dt><dd>{sourceUpdate ? formatTime(sourceUpdate) : "Not reported"}</dd></div>
-                            <div><dt className="text-muted-foreground">Distance</dt><dd>{typeof distanceKm === "number" && Number.isFinite(distanceKm) ? `${distanceKm.toFixed(1)} km straight-line` : getFacilityLocationPrecision(candidate) === "LOCALITY" ? "Unknown (town/district location only)" : "Unavailable"}</dd></div>
+                            <div><dt className="text-muted-foreground">Distance</dt><dd>{typeof distanceKm === "number" && Number.isFinite(distanceKm) ? `${distanceKm.toFixed(1)} km straight-line` : "Unavailable"}</dd></div>
                           </dl>
                           {retrieved ? <p className="mt-2 text-xs text-muted-foreground">Fetched {formatTime(retrieved)}</p> : null}
                           <div className="mt-4 flex flex-wrap gap-2">
@@ -1965,7 +2009,7 @@ function BloodSearchPage() {
                               <Eye className="mr-1 size-3.5" aria-hidden="true" /> Preview details
                             </Button>
                             {phoneLink ? <a href={phoneLink} className="inline-flex min-h-9 items-center gap-1 rounded-sm bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground"><Phone className="size-3.5" aria-hidden="true" />Call to confirm</a> : <span className="self-center text-xs text-muted-foreground">{syntheticFacility ? "Demo only · no call" : "Phone unavailable"}</span>}
-                            {directionsUrl && hasReliableFacilityDestination({ name, ...(destinationCoordinates ?? {}), ...(address ? { address } : {}) }) ? <a href={directionsUrl} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-9 items-center gap-1 rounded-sm border border-input px-3 py-2 text-xs font-semibold"><Navigation className="size-3.5" aria-hidden="true" />Directions</a> : null}
+                            {directionsUrl && hasReliableFacilityDestination({ name, ...(coordinates ?? {}), ...(address ? { address } : {}) }) ? <a href={directionsUrl} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-9 items-center gap-1 rounded-sm border border-input px-3 py-2 text-xs font-semibold"><Navigation className="size-3.5" aria-hidden="true" />Directions</a> : null}
                           </div>
                           {!reviewable ? <p className="mt-2 text-xs text-muted-foreground">This record cannot be added to the call-list review because it is not an exactly scoped live-stock match or uncertain match.</p> : null}
                         </article>
