@@ -192,7 +192,7 @@ class ERaktKoshAdapter:
     no_store = True
 
     def __init__(self, *, base_url: str = OFFICIAL_URL, api_key: str = "", contract_file: str = "",
-                 access_verified: bool = True, timeout_s: float = 8.0, probe_ttl_s: int = 60,
+                 access_verified: bool = True, timeout_s: float = 30.0, probe_ttl_s: int = 60,
                  source_timezone: str | None = "Asia/Kolkata",
                  clock: Callable[[], datetime] = utcnow,
                  transport: httpx.AsyncBaseTransport | None = None,
@@ -299,7 +299,7 @@ class ERaktKoshAdapter:
             raise SourceRateLimited(f"e-RaktKosh retry window active; wait about {int(remaining) + 1}s")
         try:
             async with self._semaphore:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(self._timeout, connect=3.0),
+                async with httpx.AsyncClient(timeout=httpx.Timeout(self._timeout, connect=15.0),
                                              transport=self._transport, follow_redirects=False) as client:
                     response = await client.get(self._base, params=params, headers=headers)
         except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
