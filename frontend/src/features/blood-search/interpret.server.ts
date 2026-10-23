@@ -1,16 +1,9 @@
-
-import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { streamText } from "ai";
 import { z } from "zod";
-
-const primaryModel = "gemini-3.8-flash";
-const fallbackModel = "gemini-3.5-flash-lite";
 
 const fieldsSchema = z.object({
   blood_group: z
     .enum(["O-", "O+", "A-", "A+", "B-", "B+", "AB-", "AB+"])
     .nullable(),
-
   component: z
     .enum([
       "cryo_poor_plasma",
@@ -30,173 +23,81 @@ const fieldsSchema = z.object({
       "platelets",
     ])
     .nullable(),
-
   quantity: z.number().finite().positive().nullable(),
-
   quantity_unit: z.enum(["units", "bags", "ml"]).nullable(),
-
   district: z.string().trim().max(120).nullable(),
-
   state: z.string().trim().max(120).nullable(),
 });
 
 export type SuggestedFields = z.infer<typeof fieldsSchema>;
 
-function parseModelJson(text: string): SuggestedFields {
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-
-  if (start < 0 || end <= start) {
-    throw new Error(
-      "The request details could not be read. You can enter them manually.",
-    );
-  }
-
-  try {
-    return fieldsSchema.parse(
-      JSON.parse(text.slice(start, end + 1)),
-    );
-  } catch {
-    throw new Error(
-      "The request details could not be read. You can enter them manually.",
-    );
-  }
-}
-
-function getFailureMessage(error: unknown): string {
-  const value =
-    typeof error === "object" && error !== null
-      ? (error as Record<string, unknown>)
-      : {};
-
-  const status = value["statusCode"] ?? value["status"];
-  const message =
-    typeof value["message"] === "string" ? value["message"] : "";
-
-  if (status === 401) {
-    return "AI assistance is not configured correctly. Your search form is still available.";
-  }
-
-  if (status === 403) {
-    return (
-      message ||
-      "AI assistance is currently unavailable. Your search form is still available."
-    );
-  }
-
-  if (status === 429) {
-    return "AI assistance is busy right now. Your search form is still available.";
-  }
-
-  if (typeof status === "number" && status >= 500) {
-    return "AI assistance is temporarily unavailable. Your search form is still available.";
-  }
-
-  return "AI assistance could not read this request. You can enter the fields manually.";
-}
-
-export async function suggestRequestFields(input: {
+type SuggestionInput = {
   text?: string | undefined;
   imageBase64?: string | undefined;
   imageMimeType?: "image/jpeg" | "image/png" | "image/webp" | undefined;
-}): Promise<SuggestedFields> {
-  // GEMINI_API_KEY is the documented project setting; GOOGLE_API_KEY is a supported alias.
-  const apiKey = process.env["GEMINI_API_KEY"] || process.env["GOOGLE_API_KEY"];
+};
 
-  if (!apiKey) {
+type BackendResponse = {
+  message?: unknown;
+  error?: { message?: unknown };
+};
+
+/**
+ * Field extraction runs on the backend so all AI assistance uses one server-side
+ * Gemini key. This avoids requiring a second key on the frontend hosting provider.
+ */
+export async function suggestRequestFields(input: SuggestionInput): Promise<SuggestedFields> {
+  const configuredBackendUrl = process.env["BACKEND_INTERNAL_URL"]?.trim();
+  const backendUrl = configuredBackendUrl || (
+    process.env["NODE_ENV"] === "production" ? "" : "http://127.0.0.1:8000"
+  );
+  if (!backendUrl) {
     throw new Error(
-      "AI assistance is not configured yet. Your search form is still available.",
+      "AI assistance is not connected to the backend. Set BACKEND_INTERNAL_URL in the frontend deployment.",
     );
   }
 
-  const google = createGoogleGenerativeAI({ apiKey });
-
-  const instructions = [
-    "Extract only explicit blood-request details from the user's text or prescription image.",
-    "Do not infer a blood group from a diagnosis, medication, or other medical context.",
-    "Never give medical advice. Do not guess any missing detail; use null.",
-    "Understand multilingual text and handwriting when legible.",
-    "Preserve district and state only when clearly present.",
-    "Return only one valid JSON object with keys blood_group, component, quantity, quantity_unit, district, state.",
-    "Allowed blood_group values: O-, O+, A-, A+, B-, B+, AB-, AB+.",
-    "Allowed component values: cryo_poor_plasma, cryoprecipitate, fresh_frozen_plasma, irradiated_rbc, leukoreduced_rbc, prbc, plasma, platelet_concentrate, platelet_rich_plasma, random_donor_platelets, sagm_packed_red_blood_cells, single_donor_plasma, single_donor_platelets, whole_blood, platelets.",
-    "For a generic mention of platelets, use platelet_concentrate only as the source selection and do not infer clinical equivalence to other platelet products.",
-    "Allowed quantity_unit values: units, bags, ml.",
-    "quantity must be a positive number or null.",
-    "Use null for every missing or ambiguous field.",
-    "Return JSON only, without Markdown fences or explanatory text.",
-  ].join(" ");
-
-  const content: Array<
-    | { type: "text"; text: string }
-    | { type: "image"; image: Uint8Array; mediaType: string }
-  > = [
-    {
-      type: "text",
-      text: `${instructions}\n\nRequest: ${
-        input.text?.trim() || "No written request."
-      }`,
-    },
-  ];
-
-  if (input.imageBase64 && input.imageMimeType) {
-    const binary = atob(input.imageBase64);
-    const image = Uint8Array.from(binary, (char) =>
-      char.charCodeAt(0),
-    );
-
-    content.push({
-      type: "image",
-      image,
-      mediaType: input.imageMimeType,
-    });
-  }
-
-  const run = async (model: string): Promise<SuggestedFields> => {
-    const result = streamText({
-      model: google(model),
-      maxRetries: 0,
-      messages: [
-        {
-          role: "user",
-          content,
-        },
-      ],
-    });
-
-    return parseModelJson(await result.text);
-  };
-
+  let response: Response;
   try {
-    return await run(primaryModel);
+    response = await fetch(`${backendUrl.replace(/\/+$/, "")}/api/suggest-fields`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+      cache: "no-store",
+      signal: AbortSignal.timeout(35_000),
+    });
   } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message.startsWith(
-        "The request details could not be read",
-      )
-    ) {
-      throw error;
+    if (error instanceof Error && error.name === "TimeoutError") {
+      throw new Error("AI field suggestions took too long. Try again, or enter the request manually.");
     }
-
-    const record =
-      typeof error === "object" && error !== null
-        ? (error as Record<string, unknown>)
-        : {};
-
-    const status = record["statusCode"] ?? record["status"];
-
-    if (
-      status === 429 ||
-      (typeof status === "number" && status >= 500)
-    ) {
-      try {
-        return await run(fallbackModel);
-      } catch (fallbackError) {
-        throw new Error(getFailureMessage(fallbackError));
-      }
-    }
-
-    throw new Error(getFailureMessage(error));
+    throw new Error(
+      "AI assistance could not reach the backend. Check BACKEND_INTERNAL_URL and try again.",
+    );
   }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error("AI assistance returned an unreadable response. Your form is still available.");
+  }
+
+  if (!response.ok) {
+    const error = payload as BackendResponse;
+    const message =
+      typeof error?.message === "string"
+        ? error.message
+        : typeof error?.error?.message === "string"
+          ? error.error.message
+          : response.status === 404
+            ? "AI assistance is not available on the backend deployment yet. Redeploy the latest backend."
+            : "AI assistance is temporarily unavailable. Your search form is still available.";
+    throw new Error(message);
+  }
+
+  const parsed = fieldsSchema.safeParse(payload);
+  if (!parsed.success) {
+    throw new Error("AI assistance returned incomplete fields. You can enter them manually.");
+  }
+  return parsed.data;
 }
