@@ -92,10 +92,80 @@ class Coordinator:
         inv_res, resp = await InventoryAgent(tools).run(q)
         state["steps"].append(inv_res)
         warnings = list(resp.warnings)
+
+        # Expand scope only when explicitly requested quantity is not covered by positive
+        # local reports. Each district query is charged through the bounded ToolBox.
+        from app.services.geography import get_adjacent_districts
+        from app.inventory.models import StockQuery
+        requested_units = quantity if quantity is not None else req.filters.quantity
+        def positive_units(items):
+            return sum(
+                float(stock.quantity or 0)
+                for item in items for stock in item.stock
+                if stock.quantity is not None and stock.quantity > 0
+                and stock.reported_status == "available"
+                and stock.blood_group == q.blood_group.value
+                and stock.component == q.component.value
+                and stock.quantity_unit == "units"
+            )
+        search_level = "local_district"
+        local_units = positive_units(resp.data)
+        if requested_units and local_units < requested_units and q.district:
+            expanded_data = list(resp.data)
+            adjacent = get_adjacent_districts(q.district)
+            for district_name in adjacent:
+                if local_units >= requested_units:
+                    break
+                expanded_query = StockQuery(
+                    state=q.state, district=district_name, blood_group=q.blood_group,
+                    component=q.component, centre_query=q.centre_query,
+                    page=1, page_size=100,
+                )
+                try:
+                    expanded = await tools.call("search_stock", query=expanded_query)
+                except Exception as exc:
+                    warnings.append(f"Nearby district search failed for {district_name}: {type(exc).__name__}.")
+                    continue
+                if expanded.source_status in (S.UNAVAILABLE, S.SOURCE_NOT_CONFIGURED,
+                                                S.SOURCE_ACCESS_DENIED, S.SOURCE_PARSE_FAILED,
+                                                S.SOURCE_RATE_LIMITED):
+                    continue
+                # A facility may have multiple rows; include only positive, relevant stock.
+                eligible = []
+                for item in expanded.data:
+                    stocks = [stock for stock in item.stock
+                              if stock.quantity is not None and stock.quantity > 0
+                              and stock.reported_status == "available"
+                              and stock.blood_group == q.blood_group.value
+                              and stock.component == q.component.value
+                              and stock.quantity_unit == "units"]
+                    if stocks:
+                        eligible.append(item.model_copy(update={"stock": stocks}))
+                existing_ids = {item.bank.bank_id for item in expanded_data}
+                expanded_data.extend(item for item in eligible if item.bank.bank_id not in existing_ids)
+                local_units = positive_units(expanded_data)
+            if len(expanded_data) > len(resp.data):
+                # Keep the original response metadata; make the broader scope explicit.
+                resp = resp.model_copy(update={
+                    "data": expanded_data,
+                    "pagination": resp.pagination.model_copy(update={"total": len(expanded_data)}),
+                    "warnings": list(resp.warnings) + [
+                        "Search expanded to adjacent districts; reported stock must be reconfirmed."
+                    ],
+                })
+                search_level = "expanded_nearest_districts"
+                warnings.append("search_level: expanded_nearest_districts")
         if resp.source_status in (S.UNAVAILABLE, S.SOURCE_NOT_CONFIGURED, S.SOURCE_ACCESS_DENIED,
                                   S.SOURCE_PARSE_FAILED, S.SOURCE_RATE_LIMITED):
             return done("UNAVAILABLE", inventory=resp, warnings=warnings +
                         ["Source unavailable. This is NOT evidence of zero stock; contact blood banks directly."])
+        # Defence in depth: zero/negative stock is never surfaced as a candidate.
+        resp = resp.model_copy(update={"data": [
+            item.model_copy(update={"stock": [stock for stock in item.stock
+                if stock.quantity is not None and stock.quantity > 0]})
+            for item in resp.data if any(stock.quantity is not None and stock.quantity > 0
+                                         for stock in item.stock)
+        ]})
         ev_res, quality = await EvidenceAgent(tools).run(resp)
         state["steps"].append(ev_res)
         warnings += ev_res.warnings
@@ -114,7 +184,8 @@ class Coordinator:
             cands.append(Candidate(
                 rank=n, bank_id=it.bank.bank_id, name=it.bank.name,
                 evidence_quality=quality[it.bank.bank_id],
-                match_type="EXACT_SCOPE_TEXT_FILTER" if q.centre_query else "EXACT_SCOPE",
+                match_type=("EXPANDED_NEAREST_DISTRICTS" if search_level == "expanded_nearest_districts" else
+                           ("EXACT_SCOPE_TEXT_FILTER" if q.centre_query else "EXACT_SCOPE")),
                 reasons=why, flags=it.bank.flags,
                 evidence_refs=[s.evidence_ref for s in it.stock],
                 source_updated_at=st.source_updated_at, fetched_at=st.fetched_at,
@@ -123,6 +194,7 @@ class Coordinator:
                 reported_quantity=st.quantity, reported_quantity_unit=st.quantity_unit,
                 distance_km=distance, distance_type="straight_line" if distance is not None else None))
         out = done("COMPLETED", inventory=resp, candidates=cands, contact_plan=plan, warnings=warnings,
+                   search_level=search_level,
                    evidence_refs=sorted({r for e in plan for r in e.evidence_refs}))
         bad = verify_agent_output(out)
         if bad:
