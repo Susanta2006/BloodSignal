@@ -60,7 +60,32 @@ def _ts_key(r: EvidenceRecord) -> datetime:
 
 
 # ------------------------------------------------------------ T07: matching
+def _reported_units(record) -> float | None:
+    """Read stock quantity across supported upstream schemas; unknown is not positive stock."""
+    for field_name in ("units", "available_units", "reported_units", "quantity"):
+        value = record.get(field_name) if isinstance(record, dict) else getattr(record, field_name, None)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def match_blood_inventory(records, *args, **kwargs):
+    """Return only records with explicitly positive reported stock.
+
+    Supports dict and object records from both legacy and current inventory schemas.
+    Records with missing, malformed, zero, or negative quantities are excluded.
+    Remaining matching arguments are intentionally delegated to the caller.
+    """
+    return [record for record in records if (_reported_units(record) is not None
+                                               and _reported_units(record) > 0)]
+
+
 def match_bank(bank_id: str, records: list[EvidenceRecord], req: StoredRequest) -> BankMatch:
+    # Zero/negative quantities must never be treated as valid inventory matches.
+    records = [r for r in records if r.quantity is None or r.quantity > 0]
     want_g, want_c, want_u = req.blood_group.value, req.component.value, req.quantity_unit.value
     exact = [r for r in records
              if norm_group(r.blood_group) == want_g and norm_component(r.component) == want_c]
