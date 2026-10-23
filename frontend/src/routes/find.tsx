@@ -57,6 +57,7 @@ import {
   type SearchRequest,
 } from "@/features/blood-search/contracts";
 import { evidenceState } from "@/features/blood-search/evidence";
+import { isConfirmedCandidate, isReviewableCandidate } from "@/features/blood-search/eligibility";
 import { haversineDistanceKm } from "@/features/blood-search/distance";
 import { componentOptions, componentDisplayName, eraktkoshStates } from "@/features/blood-search/eraktkosh-catalog";
 import { districtsByState, nearbyDistrictSuggestions } from "@/features/blood-search/district-catalog";
@@ -374,6 +375,8 @@ function BloodSearchPage() {
   const [approved, setApproved] = useState(false);
   const [approvalSubmitting, setApprovalSubmitting] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
+  const [showOtherResults, setShowOtherResults] = useState(false);
+  const [resultPage, setResultPage] = useState(1);
   const [viewMode, setViewMode] = useState<"list" | "map">("list");
   const [travelMode, setTravelMode] = useState<TravelMode>("driving");
   const [lastPayload, setLastPayload] = useState<SearchRequest | null>(null);
@@ -610,8 +613,36 @@ function BloodSearchPage() {
     });
   }, [candidates, sortMode, sharedDeviceOrigin?.latitude, sharedDeviceOrigin?.longitude]);
 
+  const eligibilityRequest = lastPayload
+    ? {
+        blood_group: lastPayload.blood_group,
+        component: lastPayload.component,
+        quantity: lastPayload.quantity,
+        quantity_unit: lastPayload.quantity_unit,
+      }
+    : null;
+  const confirmedCandidates = useMemo(
+    () => sortedCandidates.filter((candidate) => isConfirmedCandidate(candidate, eligibilityRequest)),
+    [sortedCandidates, lastPayload?.blood_group, lastPayload?.component, lastPayload?.quantity,
+      lastPayload?.quantity_unit],
+  );
+  const otherCandidates = useMemo(
+    () => sortedCandidates.filter((candidate) => !isConfirmedCandidate(candidate, eligibilityRequest)),
+    [sortedCandidates, lastPayload?.blood_group, lastPayload?.component, lastPayload?.quantity,
+      lastPayload?.quantity_unit],
+  );
+  const shownCandidates = showOtherResults ? otherCandidates : confirmedCandidates;
+  const resultsPageCount = Math.max(1, Math.ceil(shownCandidates.length / 5));
+  const paginatedCandidates = shownCandidates.slice((resultPage - 1) * 5, resultPage * 5);
+  const startEntry = shownCandidates.length ? (resultPage - 1) * 5 + 1 : 0;
+  const endEntry = Math.min(resultPage * 5, shownCandidates.length);
+
+  useEffect(() => {
+    setResultPage((current) => Math.min(current, resultsPageCount));
+  }, [resultsPageCount]);
+
   const mapFacilities = useMemo<FacilityMapItem[]>(() => {
-    return sortedCandidates.flatMap((candidate, index) => {
+    return paginatedCandidates.flatMap((candidate, index) => {
       const coordinates = getFacilityCoordinates(candidate);
       const name = label(candidate["bank_name"] ?? candidate["name"]);
       if (!coordinates || !name) return [];
@@ -631,12 +662,15 @@ function BloodSearchPage() {
         },
       ];
     });
-  }, [sortedCandidates]);
+  }, [paginatedCandidates]);
 
   const loadCandidates = useCallback(async (runId: string) => {
     try {
       const nextCandidates = await getCandidates(runId);
       setCandidates(nextCandidates);
+      setSelected([]);
+      setShowOtherResults(false);
+      setResultPage(1);
       setState("ready");
       setMessage("");
     } catch (error) {
@@ -1509,13 +1543,11 @@ function BloodSearchPage() {
 
             {state === "ready" && candidates.length > 0 ? (
               <>
-                {!candidates.some((candidate) =>
-                  ["A_ELIGIBLE", "B_UNCERTAIN", "C_INSUFFICIENT"].includes(String(candidate["section"])),
-                ) ? (
+                {confirmedCandidates.length === 0 ? (
                   <div className="mb-5 border border-border p-4" role="status">
-                    <h3 className="font-semibold">No matching component and blood-group stock was confirmed</h3>
+                    <h3 className="font-semibold">No confirmed full match for this request</h3>
                     <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                      Other-component records and unknown inventory are not matches. This does not prove that no stock exists.
+                      No result passed the blood-group, component, positive-stock, requested-quantity, and freshness checks. Unverified or mismatched records are kept separate and are not counted as matches.
                     </p>
                     {lastPayload?.location.mode === "manual" && nearbyDistrictSuggestions(lastPayload.location.district).length ? (
                       <p className="mt-2 text-sm">
@@ -1533,10 +1565,34 @@ function BloodSearchPage() {
                   </div>
                 ) : null}
                 <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-                  <p className="text-sm text-muted-foreground">
-                    Showing {sortedCandidates.length} of {candidates.length} facilities returned by
-                    the search service
-                  </p>
+                  <div>
+                    <p className="text-sm font-medium">
+                      {showOtherResults ? "Other facility records — not confirmed matches" : "Confirmed matching inventory"}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground" aria-live="polite">
+                      {shownCandidates.length
+                        ? `Showing ${startEntry}–${endEntry} of ${shownCandidates.length} ${showOtherResults ? "other records" : "eligible facilities"}`
+                        : showOtherResults
+                          ? "No other facility records were returned."
+                          : "No confirmed matches were returned."}
+                    </p>
+                  </div>
+                  {otherCandidates.length > 0 ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="rounded-sm"
+                      onClick={() => {
+                        setShowOtherResults((current) => !current);
+                        setResultPage(1);
+                      }}
+                    >
+                      {showOtherResults
+                        ? `Back to confirmed matches (${confirmedCandidates.length})`
+                        : `Show other records (${otherCandidates.length})`}
+                    </Button>
+                  ) : null}
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
                     <label htmlFor="travel-mode" className="text-xs text-muted-foreground">
                       Directions
@@ -1584,9 +1640,9 @@ function BloodSearchPage() {
                 {viewMode === "map" ? (
                   <div className="mb-5">
                     <BloodBankMap facilities={mapFacilities} />
-                    {mapFacilities.length < sortedCandidates.length ? (
+                    {mapFacilities.length < paginatedCandidates.length ? (
                       <p className="mt-3 text-xs leading-5 text-muted-foreground">
-                        {sortedCandidates.length - mapFacilities.length} result(s) omitted from the
+                        {paginatedCandidates.length - mapFacilities.length} result(s) omitted from the
                         map because reliable coordinates or a facility name were not provided. These
                         results remain available in the list below.
                       </p>
@@ -1594,7 +1650,8 @@ function BloodSearchPage() {
                   </div>
                 ) : null}
                 {viewMode === "list" ? (
-                  <div className="overflow-x-auto rounded-sm border border-border">
+                  <>
+                  <div className="hidden overflow-x-auto rounded-sm border border-border md:block">
                     <table className="w-full min-w-[1120px] border-collapse text-left text-sm">
                       <caption className="sr-only">
                         Blood bank search results with request match, evidence, distance, contact,
@@ -1629,7 +1686,7 @@ function BloodSearchPage() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-border">
-                        {sortedCandidates.map((candidate, index) => {
+                        {paginatedCandidates.map((candidate, index) => {
                           const id = label(candidate["candidate_id"] ?? candidate["id"]);
                           const name =
                             label(candidate["bank_name"] ?? candidate["name"]) ||
@@ -1713,7 +1770,7 @@ function BloodSearchPage() {
                                 <div className="flex items-center gap-2">
                                   <Checkbox
                                     checked={Boolean(selectedId) && selected.includes(selectedId)}
-                                    disabled={!selectedId}
+                                    disabled={!selectedId || !isReviewableCandidate(candidate, eligibilityRequest)}
                                     onCheckedChange={(checked) =>
                                       setSelected((current) =>
                                         checked === true
@@ -1884,18 +1941,108 @@ function BloodSearchPage() {
                       </tbody>
                     </table>
                   </div>
+                  <div className="block space-y-3 md:hidden">
+                    {paginatedCandidates.map((candidate, index) => {
+                      const id = label(candidate["candidate_id"] ?? candidate["id"]);
+                      const name = label(candidate["bank_name"] ?? candidate["name"]) || "Facility name unavailable";
+                      const address = label(candidate["address"] ?? candidate["formatted_address"]);
+                      const district = label(candidate["district"]);
+                      const city = label(candidate["city"]);
+                      const stateName = label(candidate["state"]);
+                      const locationText = [...new Set([city, district, stateName].filter(Boolean))].join(", ") || address || "Location not provided";
+                      const phone = label(candidate["phone"] ?? candidate["phone_number"]);
+                      const directorySource = label(candidate["directory_source"]);
+                      const syntheticFacility = candidate["facility_source_type"] === "demo" || directorySource === "Synthetic demo directory";
+                      const status = evidenceState(candidate);
+                      const stock = asValue(candidate["stock"] ?? candidate["availability"]);
+                      const reportedGroup = label(candidate["blood_group_reported"] ?? stock["blood_group"]);
+                      const reportedComponent = label(candidate["component_reported"] ?? stock["component"]);
+                      const reportedQuantity = candidate["quantity_reported"] ?? stock["quantity"];
+                      const reportedUnit = label(candidate["quantity_unit_reported"] ?? stock["quantity_unit"]);
+                      const sourceUpdate = label(candidate["source_updated_at"] ?? stock["source_updated_at"] ?? candidate["source_updated_at_raw"] ?? stock["source_updated_at_raw"]);
+                      const retrieved = label(candidate["retrieved_at"] ?? candidate["retrieval_time"]);
+                      const coordinates = getFacilityCoordinates(candidate);
+                      const directionsUrl = syntheticFacility ? null : buildDirectionsUrl(
+                        { name, ...(coordinates ?? {}), ...(address ? { address } : {}) },
+                        travelMode,
+                        lastPayload?.location.mode === "device"
+                          ? `${lastPayload.location.latitude},${lastPayload.location.longitude}`
+                          : lastPayload?.location.mode === "manual"
+                            ? `${lastPayload.location.district}, ${lastPayload.location.state}, India`
+                            : undefined,
+                      );
+                      const phoneLink = syntheticFacility ? null : telephoneHref(phone);
+                      const distanceKm = candidateDistanceKm(candidate, sharedDeviceOrigin);
+                      const reviewable = isReviewableCandidate(candidate, eligibilityRequest);
+                      return (
+                        <article key={id || `mobile-result-${index}`} className="rounded-sm border border-border p-4">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <h3 className="font-semibold">{name}</h3>
+                              <p className="mt-1 text-sm text-muted-foreground">{locationText}</p>
+                              {address && address !== locationText ? <p className="mt-1 text-sm text-muted-foreground">{address}</p> : null}
+                            </div>
+                            <Checkbox
+                              checked={Boolean(id) && selected.includes(id)}
+                              disabled={!id || !reviewable}
+                              onCheckedChange={(checked) => setSelected((current) => checked === true
+                                ? [...new Set([...current, id])]
+                                : current.filter((item) => item !== id))}
+                              aria-label={`Select ${name} for call-list review`}
+                            />
+                          </div>
+                          <div className="mt-3 flex flex-wrap items-center gap-2">
+                            <Badge variant="outline" className={"rounded-sm font-normal " + status.tone}>{status.title}</Badge>
+                            {candidate["source_type"] === "demo" ? <Badge variant="outline" className="border-warning/40 bg-warning/10 text-warning">Demo inventory</Badge> : null}
+                          </div>
+                          {status.warning ? <p className="mt-2 text-sm leading-5 text-warning">{status.warning}</p> : null}
+                          <dl className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                            <div><dt className="text-muted-foreground">Requested</dt><dd>{lastPayload ? `${lastPayload.blood_group} · ${componentLabel(lastPayload.component)} · ${lastPayload.quantity} ${lastPayload.quantity_unit}` : "Not available"}</dd></div>
+                            <div><dt className="text-muted-foreground">Reported stock</dt><dd>{reportedGroup || "Group not stated"} · {reportedComponent ? componentLabel(reportedComponent) : "Component not stated"} · {typeof reportedQuantity === "number" ? `${reportedQuantity} ${reportedUnit || "units"}` : "Quantity not reported"}</dd></div>
+                            <div><dt className="text-muted-foreground">Source updated</dt><dd>{sourceUpdate ? formatTime(sourceUpdate) : "Not reported"}</dd></div>
+                            <div><dt className="text-muted-foreground">Distance</dt><dd>{typeof distanceKm === "number" && Number.isFinite(distanceKm) ? `${distanceKm.toFixed(1)} km straight-line` : "Unavailable"}</dd></div>
+                          </dl>
+                          {retrieved ? <p className="mt-2 text-xs text-muted-foreground">Fetched {formatTime(retrieved)}</p> : null}
+                          <div className="mt-4 flex flex-wrap gap-2">
+                            <Button type="button" size="sm" variant="outline" onClick={() => setPreviewCandidate(candidate)}>
+                              <Eye className="mr-1 size-3.5" aria-hidden="true" /> Preview details
+                            </Button>
+                            {phoneLink ? <a href={phoneLink} className="inline-flex min-h-9 items-center gap-1 rounded-sm bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground"><Phone className="size-3.5" aria-hidden="true" />Call to confirm</a> : <span className="self-center text-xs text-muted-foreground">{syntheticFacility ? "Demo only · no call" : "Phone unavailable"}</span>}
+                            {directionsUrl && hasReliableFacilityDestination({ name, ...(coordinates ?? {}), ...(address ? { address } : {}) }) ? <a href={directionsUrl} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-9 items-center gap-1 rounded-sm border border-input px-3 py-2 text-xs font-semibold"><Navigation className="size-3.5" aria-hidden="true" />Directions</a> : null}
+                          </div>
+                          {!reviewable ? <p className="mt-2 text-xs text-muted-foreground">This record cannot be added to the call-list review because it is not an exactly scoped live-stock match or uncertain match.</p> : null}
+                        </article>
+                      );
+                    })}
+                  </div>
+                  </>
                 ) : null}
-                {!sortedCandidates.length ? (
+                {!shownCandidates.length ? (
                   <p className="py-5 text-sm text-muted-foreground">
-                    No results match the selected filters. Change the evidence filter or location.
+                    {showOtherResults ? "No other facility records were returned." : "No facilities meet every confirmed-match requirement. Show other records to inspect unverified or mismatched source rows."}
                   </p>
+                ) : null}
+                {shownCandidates.length > 0 ? (
+                  <nav className="mt-5 flex flex-wrap items-center justify-between gap-3" aria-label="Search result pages">
+                    <span className="text-xs text-muted-foreground">Page {resultPage} of {resultsPageCount}</span>
+                    <div className="flex flex-wrap items-center gap-1">
+                      <Button type="button" size="sm" variant="outline" disabled={resultPage <= 1} onClick={() => setResultPage((page) => Math.max(1, page - 1))}>Previous</Button>
+                      {Array.from({ length: resultsPageCount }, (_, index) => index + 1).map((pageNumber) => (
+                        <Button key={pageNumber} type="button" size="sm" variant={resultPage === pageNumber ? "default" : "outline"} aria-current={resultPage === pageNumber ? "page" : undefined} onClick={() => setResultPage(pageNumber)}>{pageNumber}</Button>
+                      ))}
+                      <Button type="button" size="sm" variant="outline" disabled={resultPage >= resultsPageCount} onClick={() => setResultPage((page) => Math.min(resultsPageCount, page + 1))}>Next</Button>
+                    </div>
+                  </nav>
                 ) : null}
                 <div className="mt-5 flex flex-wrap items-center gap-3">
                   <Button
                     type="button"
                     variant="outline"
                     className="h-10 rounded-sm"
-                    disabled={!selected.length}
+                    disabled={!selected.some((candidateId) => {
+                      const candidate = candidates.find((item) => label(item["candidate_id"] ?? item["id"]) === candidateId);
+                      return Boolean(candidate && isReviewableCandidate(candidate, eligibilityRequest));
+                    })}
                     onClick={() => void proposeCallList()}
                   >
                     Prepare call-list review

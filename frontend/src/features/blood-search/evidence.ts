@@ -46,6 +46,9 @@ export function evidenceState(candidate: Record<string, unknown>): EvidenceStatu
     stock["is_stale"] === true ||
     candidate["is_stale"] === true ||
     ["stale", "outdated"].includes(normalized);
+  const reasonCodes = Array.isArray(candidate["reason_codes"])
+    ? candidate["reason_codes"].filter((code): code is string => typeof code === "string")
+    : [];
 
   if (conflicting)
     return {
@@ -65,6 +68,18 @@ export function evidenceState(candidate: Record<string, unknown>): EvidenceStatu
       title: "Source unavailable",
       tone: tones.neutral,
       warning: "The stock source could not be reached. No availability is confirmed.",
+    };
+  if (reasonCodes.includes("ZERO_STOCK"))
+    return {
+      title: "Zero stock reported",
+      tone: tones.danger,
+      warning: "The source reports zero available units for this request. This is not a stock match.",
+    };
+  if (reasonCodes.includes("STATUS_NOT_AVAILABLE"))
+    return {
+      title: "Source reports unavailable",
+      tone: tones.danger,
+      warning: "The source explicitly reports this stock as unavailable.",
     };
   if (candidate["section"] === "C_INSUFFICIENT" || candidate["match_state"] === "INSUFFICIENT")
     return {
