@@ -46,35 +46,13 @@ def add_distance_metadata(
     origin: tuple[float, float] | None,
     location_mode: str,
 ) -> None:
-    # Materialize once so we can detect a common geocoding failure: different facilities
-    # being assigned exactly the same town-centre / first-result coordinates. Never display
-    # the same computed distance for distinct banks merely because a geocoder reused a point.
-    candidates = list(candidates)
-    coordinate_bank_ids: dict[tuple[float, float], set[str]] = {}
-    for item in candidates:
-        b = item.bank
-        if (valid_coordinate_pair(b.latitude, b.longitude)
-                and b.location_precision == "FACILITY"):
-            point = (float(b.latitude), float(b.longitude))
-            coordinate_bank_ids.setdefault(point, set()).add(b.bank_id)
-    duplicate_points = {point for point, bank_ids in coordinate_bank_ids.items() if len(bank_ids) > 1}
-
     for candidate in candidates:
         bank = candidate.bank
-        # Locality-centre coordinates are useful map hints, but they are not the
-        # individual blood bank's location and must not be used for per-facility distance.
         destination = (
             (bank.latitude, bank.longitude)
             if valid_coordinate_pair(bank.latitude, bank.longitude)
-            and bank.location_precision != "LOCALITY"
             else None
         )
-        point = ((float(bank.latitude), float(bank.longitude))
-                 if valid_coordinate_pair(bank.latitude, bank.longitude)
-            and bank.location_precision != "LOCALITY" else None)
-        duplicated_geocode = point in duplicate_points if point is not None else False
-        if duplicated_geocode:
-            destination = None
         distance = haversine_distance_km(origin, destination)
         if distance is not None:
             candidate.distance_km = round(distance, 3)
@@ -92,10 +70,6 @@ def add_distance_metadata(
                     if location_mode == "manual"
                     else "Exact distance is unavailable because device coordinates were not shared."
                 )
-            elif bank.location_precision == "LOCALITY":
-                reason = "Facility-specific distance is unavailable because only town/district-centre coordinates are available."
-            elif duplicated_geocode:
-                reason = "Facility-specific distance is withheld because multiple distinct banks share the same coordinates; verify each facility location."
             else:
                 reason = "Exact distance is unavailable because this facility has no valid coordinates."
             candidate.distance_unavailable_reason = reason

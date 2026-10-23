@@ -282,7 +282,7 @@ class ERaktKoshAdapter:
                                 bank = bank.model_copy(update={
                                     "latitude": lat, "longitude": lon,
                                     "location_precision": precision,
-                                    "location_note": ("Approximate town/district centre only; not the facility location. Individual facility distance is not calculated from this point."
+                                    "location_note": ("Approximate town/district centre; not the facility location. Distance is approximate, straight-line, not road distance."
                                                       if precision == "LOCALITY" else
                                                       "Geocoded facility location; distance is approximate, straight-line, not road distance.")})
                         except Exception as exc:  # geocoding must never fail the stock search
