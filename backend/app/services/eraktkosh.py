@@ -303,10 +303,21 @@ class ERaktKoshAdapter:
                                              transport=self._transport, follow_redirects=False) as client:
                     response = await client.get(self._base, params=params, headers=headers)
         except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
-            # Retry policy belongs to the existing workflow/service wrapper: at most 3 total
-            # attempts (two retries), with bounded backoff/jitter. Avoid nested retry loops here.
+            log.warning(
+                "e-RaktKosh request failed: error_type=%s state_code=%s component_id=%s",
+                type(exc).__name__,
+                state_code,
+                component_id,
+            )
             raise SourceUnavailable(type(exc).__name__) from exc
+        
         except httpx.HTTPError as exc:
+            log.warning(
+                "e-RaktKosh HTTP client error: error_type=%s state_code=%s component_id=%s",
+                type(exc).__name__,
+                state_code,
+                component_id,
+            )
             raise SourceUnavailable(type(exc).__name__) from exc
 
         status = response.status_code
