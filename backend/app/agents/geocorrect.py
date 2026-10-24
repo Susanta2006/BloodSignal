@@ -7,13 +7,14 @@ import re
 from typing import Any
 import redis.asyncio as redis
 from google import genai
+from google.genai import types
 
 log = logging.getLogger("geocorrect_agent")
 
 class GeoCorrectAgent:
     """
     An agentic geocoding correction and parsing layer backed by Redis cache,
-    with Gemini 3.5 Flash-Lite as the primary parser and Rule-Based heuristics as fallback.
+    using Gemini 3.5 Flash-Lite with Google Search verification to resolve accurate hospital names.
     """
     def __init__(
         self, 
@@ -25,7 +26,6 @@ class GeoCorrectAgent:
         self._ttl = ttl_seconds
         self._redis_client: redis.Redis | None = None
         
-        # Initialize Gemini Client
         api_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
         if api_key:
             self._client = genai.Client(api_key=api_key)
@@ -57,7 +57,7 @@ class GeoCorrectAgent:
             core_name = max(hospital_matches, key=len).strip()
         else:
             core_name = re.sub(r'[,.\-_/&@#()]+', ' ', cleaned)
-            core_name = " ".join(core_name.split()[:4])
+            core_name = " ".join(core_name.split()[:3])
 
         target_district = district or ""
         target_state = state or ""
@@ -70,35 +70,36 @@ class GeoCorrectAgent:
             
         return re.sub(r'\s+', ' ', " ".join(parts)).strip()
 
-    async def _gemini_semantic_sanitize(self, raw_name: str, raw_address: str | None, district: str | None, state: str | None) -> str:
-        """Primary Tier: Gemini 3.5 Flash-Lite Semantic Parsing Agent."""
+    async def _gemini_search_verified_sanitize(self, raw_name: str, raw_address: str | None, district: str | None, state: str | None) -> str:
+        """Primary Tier: Gemini 3.5 Flash-Lite with Google Search grounding to verify real-world hospital names."""
         if not self._client or not self._model_name:
             raise ValueError("Gemini client not initialized")
             
         prompt = f"""
-You are a precise geographic data extraction agent for Indian healthcare facilities.
-Your job is to clean up messy e-RaktKosh hospital entries into a clean search query for OpenStreetMap (Nominatim).
-
-Input Details:
-- Hospital Name: {raw_name}
-- Address: {raw_address or 'N/A'}
-- District: {district or 'N/A'}
-- State: {state or 'N/A'}
+Search the internet to verify and find the correct official public name and location for this Indian hospital/blood center.
+Raw Name: {raw_name}
+Raw Address: {raw_address or 'N/A'}
+District: {district or 'N/A'}
+State: {state or 'N/A'}
 
 Instructions:
-1. Strip out internal department names (e.g., 'Dept of Transfusion Medicine'), survey numbers, floor numbers, and corporate suffixes (Pvt Ltd, Prop).
-2. Keep the core official hospital name.
-3. Append the provided District and State cleanly.
-4. Return ONLY the final search string, with no extra conversational text or quotes.
+1. Use Google Search to cross-reference the actual hospital name and its city/district.
+2. Return ONLY the verified official hospital name, followed by its city/district and state (e.g., "GBP Hospital Agartala Tripura").
+3. Do not include extra conversational filler, quotes, or markdown.
 """
+        # Enable Google Search tool grounding so the model can verify names online
         response = await self._client.aio.models.generate_content(
             model=self._model_name,
             contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[{"google_search": {}}],
+            ),
         )
-        cleaned_query = response.text.strip().replace('"', '')
-        if not cleaned_query:
-            raise ValueError("Empty response from Gemini model")
-        return cleaned_query
+        verified_query = response.text.strip().replace('"', '')
+        if not verified_query:
+            raise ValueError("Empty response from Gemini search model")
+            
+        return verified_query
 
     async def resolve_location(
         self,
@@ -110,11 +111,11 @@ Instructions:
         geocoder: Any
     ) -> tuple[float, float, str] | None:
         """
-        Resolves location using: Redis cache -> Gemini 3.5 Flash-Lite (Primary) -> Rule-based parser (Fallback) -> Geocoder.
+        Resolves location using: Redis cache -> Gemini with Google Search (Primary) -> Rule-based parser (Fallback) -> Geocoder.
         """
         clean_cache_name = re.sub(r'[^a-zA-Z0-9]', '_', name.casefold())
         clean_cache_dist = re.sub(r'[^a-zA-Z0-9]', '_', (district or '').casefold())
-        cache_key = f"geocorrect:v2:{clean_cache_name}:{clean_cache_dist}"
+        cache_key = f"geocorrect:v4_search:{clean_cache_name}:{clean_cache_dist}"
         
         client = await self._get_redis()
         if client:
@@ -128,18 +129,18 @@ Instructions:
 
         corrected_query = None
         
-        # Step 1: Try Primary Gemini 3.5 Flash-Lite Sanitization
+        # Step 1: Try Primary Gemini Search-Grounded Verification
         if self._client:
             try:
-                corrected_query = await self._gemini_semantic_sanitize(name, address, district, state)
+                corrected_query = await self._gemini_search_verified_sanitize(name, address, district, state)
             except Exception as exc:
-                log.debug("Gemini primary sanitization failed, falling back to rules: %s", exc)
+                log.debug("Gemini search verification failed, falling back to rules: %s", exc)
 
-        # Step 2: Fallback to Rule-Based Parsing if Gemini fails or is unconfigured
+        # Step 2: Fallback to Rule-Based Parsing if search/LLM fails
         if not corrected_query:
             corrected_query = self._rule_based_sanitize(name, address, district, state)
 
-        # Step 3: Attempt Geocoding with the resolved query
+        # Step 3: Attempt Geocoding with the verified query
         found = None
         try:
             found = await geocoder.geocode(
