@@ -147,3 +147,58 @@ def test_disabled_geocoder_makes_no_requests():
 
     assert found is None
     assert calls == []
+
+
+def test_area_hints_read_city_and_district_from_address_tail():
+    from app.services.geocoding import area_hints
+    hints = area_hints("AGMC & GBP Hospital, GB Bazar, P.O Kunjavan, Agartala, West Tripura, Tripura", "Tripura")
+    assert hints == {"city": "Agartala", "district": "West Tripura"}
+    # Not trusted when the address does not end in the requested state.
+    assert area_hints("Some Road, Imphal, Manipur", "Tripura") == {"city": None, "district": None}
+
+
+def test_resolved_facility_is_cached_between_searches():
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.params["q"])
+        return httpx.Response(200, json=[place_result()])
+
+    geocoder = make_geocoder(handler)
+    kwargs = dict(name="Unknown Blood Centre", address="Main Road, Agartala, West Tripura, Tripura",
+                  city=None, district=None, state="Tripura")
+    first = asyncio.run(geocoder.geocode(**kwargs))
+    count = len(calls)
+    second = asyncio.run(geocoder.geocode(**kwargs))
+    assert first is not None and first == second
+    assert first[2] == "LOCALITY"
+    assert len(calls) == count  # second search made no network requests
+
+
+
+def test_matches_indian_hospital_abbreviations_like_agmc_igm():
+    from app.services.geocoding import NominatimGeocoder
+    geocoder = NominatimGeocoder(enabled=True)
+    # AGMC listed in OSM; matches request that includes AGMC
+    assert geocoder._matches_facility_name(
+        {"name": "AGMC and GBP Hospital", "display_name": "AGMC and GBP Hospital, Agartala"},
+        "Dept of Transfusion Medicine AGMC and GBP Hospital"
+    )
+    # Indira Gandhi Memorial in OSM result; matches request with same words
+    assert geocoder._matches_facility_name(
+        {"name": "Indira Gandhi Memorial Hospital", "display_name": "Indira Gandhi Memorial Hospital"},
+        "Indira Gandhi Memorial (IGM) Hospital"
+    )
+    # Short 4-letter distinctive word like "Jnims" matches single long token
+    assert geocoder._matches_facility_name(
+        {"name": "JNIMS Hospital", "display_name": "JNIMS Hospital, Imphal"},
+        "JNIMS"
+    )
+
+
+def test_area_hints_handles_missing_or_short_addresses():
+    from app.services.geocoding import area_hints
+    # Too short, no hints
+    assert area_hints("Main Road, Tripura", "Tripura") == {"city": None, "district": None}
+    # State mismatch
+    assert area_hints("Road, Imphal, Manipur, Tripura", "Manipur") == {"city": None, "district": None}

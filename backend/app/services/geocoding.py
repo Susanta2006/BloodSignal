@@ -2,7 +2,9 @@
 
 Facility coordinates are accepted only when the result's name, feature type, district,
 and state agree with the requested hospital. Locality results remain explicitly marked
-LOCALITY and are never used to calculate facility distance.
+LOCALITY; they are used for an approximate straight-line distance and are always labelled
+as approximate. Resolved facilities are cached so repeat searches do not re-geocode.
+OpenStreetMap/Nominatim (free, no API key) is the sole geocoding provider.
 """
 from __future__ import annotations
 
@@ -51,6 +53,25 @@ def _matches_area(expected: str | None, actual_values: list[object]) -> bool:
     return expected_tokens.issubset(actual_tokens)
 
 
+def area_hints(address: str | None, state: str | None) -> dict[str, str | None]:
+    """Extract city and district from an e-RaktKosh address that ends in ``..., area, district, state``.
+
+    e-RaktKosh format: HOSPITAL_NAME, locality/area, DISTRICT, STATE
+    Only trusted when the final part matches the requested state. Returns the two parts
+    before state, or (None, None) if the address is free-form or does not match state.
+    """
+    if not address or not state:
+        return {"city": None, "district": None}
+    parts = [p.strip() for p in address.split(",") if p.strip()]
+    parts = [p for p in parts if p.casefold() != "india" and not re.fullmatch(r"\d{6}", p)]
+    if len(parts) < 3:
+        return {"city": None, "district": None}
+    # Last part must match state; district is second-to-last, city/locality is third-to-last.
+    if not _tokens(state) <= _tokens(parts[-1]):
+        return {"city": None, "district": None}
+    return {"city": parts[-3] if len(parts) >= 3 else None, "district": parts[-2]}
+
+
 class NominatimGeocoder:
     def __init__(self, *, contact: str = "", base_url: str = "https://nominatim.openstreetmap.org/search",
                  application_url: str = "https://bloodsignal.vercel.app", enabled: bool = False,
@@ -58,6 +79,7 @@ class NominatimGeocoder:
                  cooldown_s: float = 900.0, clock=time.monotonic,
                  sleep=asyncio.sleep, transport: httpx.AsyncBaseTransport | None = None):
         self.enabled = enabled
+        self._resolved: OrderedDict[str, tuple[float, float, str]] = OrderedDict()
         self.contact = contact.strip()
         self.base_url = base_url.rstrip("?")
         self.application_url = application_url.strip().rstrip("/") or "https://bloodsignal.vercel.app"
@@ -73,13 +95,36 @@ class NominatimGeocoder:
     async def geocode(self, *, name: str, address: str | None, city: str | None,
                       district: str | None, state: str | None, budget_s: float = 3.0
                       ) -> tuple[float, float, str] | None:
+        """Resolve facility coordinates once; later searches reuse the cached result.
+        Uses OpenStreetMap/Nominatim (free, no API key required).
+        """
         if not self.enabled:
             return None
+        key = "|".join((name or "", address or "", state or "")).casefold()
+        if key in self._resolved:
+            self._resolved.move_to_end(key)
+            return self._resolved[key]
+        hints = area_hints(address, state)
+        city = city or hints["city"]
+        district = district or hints["district"]
         deadline = self._clock() + max(0.0, budget_s)
+        found = await self._geocode_osm(name=name, address=address, city=city,
+                                        district=district, state=state, deadline=deadline)
+        if found is not None:
+            self._resolved[key] = found
+            while len(self._resolved) > self.max_cache_entries:
+                self._resolved.popitem(last=False)
+        return found
+
+    async def _geocode_osm(self, *, name: str, address: str | None, city: str | None,
+                           district: str | None, state: str | None, deadline: float
+                           ) -> tuple[float, float, str] | None:
         facility_queries = self._queries(
             (name, address, city, district, state, "India"),
             (name, district, state, "India"),
             (name, city, state, "India"),
+            (name, address, "India"),  # Just the hospital + full address, skip areas
+            (address, "India"),  # Address alone as a fallback
         )
         locality_queries = self._queries(
             (city, district, state, "India"),
@@ -203,9 +248,15 @@ class NominatimGeocoder:
         for value in returned_names:
             returned.update(_tokens(value))
         matched = requested & returned
-        # Two distinctive words catch compound facility names; a single long name token
-        # also supports short official names such as JNIMS or Shija.
-        return len(matched) >= 2 or any(len(token) >= 5 for token in matched)
+        # For Indian hospitals: two distinctive words, or one 4+ char token, or abbreviations like AGMC, IGM.
+        # Abbreviations are uppercase runs of 2–5 letters, often present in official hospital names.
+        if len(matched) >= 2 or any(len(token) >= 4 for token in matched):
+            return True
+        # Check for acronyms/abbreviations (2–5 uppercase letters as a single word).
+        for acronym in requested:
+            if 2 <= len(acronym) <= 5 and acronym.isupper() and acronym in returned:
+                return True
+        return False
 
     async def _lookup(self, query: str, deadline: float) -> list[dict[str, Any]]:
         if query in self._cache:

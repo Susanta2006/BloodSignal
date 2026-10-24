@@ -291,10 +291,11 @@ class ERaktKoshAdapter:
                                 lat, lon, precision = found
                                 bank = bank.model_copy(update={
                                     "latitude": lat, "longitude": lon,
+                                    "state": bank.state or state,
                                     "location_precision": precision,
-                                     "location_note": ("Approximate OpenStreetMap/Nominatim town/district centre; not the facility location. © OpenStreetMap contributors. Distance is approximate, straight-line, not road distance."
+                                     "location_note": ("Approximate location geocoded from the facility address (town/district centre; © OpenStreetMap contributors). Distance is approximate, straight-line, not road distance."
                                                       if precision == "LOCALITY" else
-                                                       "Facility match from OpenStreetMap/Nominatim. © OpenStreetMap contributors. Distance is approximate, straight-line, not road distance.")})
+                                                       "Location geocoded from the facility address (© OpenStreetMap contributors). Distance is approximate, straight-line, not road distance.")})
                         except Exception as exc:  # geocoding must never fail the stock search
                             log.info("Non-fatal geocoding error: %s", type(exc).__name__)
                     updated_banks.append(bank)

@@ -121,7 +121,7 @@ def test_facility_geocoding_fallback_attaches_verified_coordinates_to_stock_resu
     bank = result.banks[0]
     assert (bank.latitude, bank.longitude) == (23.8466, 91.2868)
     assert bank.location_precision == "FACILITY"
-    assert "OpenStreetMap/Nominatim" in (bank.location_note or "")
+    assert "geocoded from the facility address" in (bank.location_note or "")
 
 
 def test_empty_array_is_valid_empty_result():

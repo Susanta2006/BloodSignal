@@ -233,7 +233,7 @@ def test_ranking_function_rejects_all_zero_weight_configuration(weights):
         rank([item], **weights)
 
 
-def test_locality_centre_coordinates_are_not_used_as_facility_distance():
+def test_locality_centre_coordinates_give_approximate_distance():
     approximate = candidate(
         "Facility with locality-only coordinates",
         latitude=24.8,
@@ -243,21 +243,21 @@ def test_locality_centre_coordinates_are_not_used_as_facility_distance():
 
     add_distance_metadata([approximate], origin=(24.9, 93.95), location_mode="device")
 
-    assert approximate.distance_km is None
-    assert approximate.distance_type is None
-    assert "town/district-centre" in (approximate.distance_unavailable_reason or "")
+    assert approximate.distance_km is not None
+    assert approximate.distance_type == "straight_line"
+    assert approximate.distance_is_approximate is True
+    assert approximate.distance_unavailable_reason is None
 
 
-def test_distinct_facilities_with_identical_geocoded_coordinates_do_not_show_same_distance():
+def test_facilities_with_identical_geocoded_coordinates_still_get_approximate_distance():
     first = candidate("Bank One", latitude=24.8, longitude=93.94, location_precision="FACILITY")
     second = candidate("Bank Two", latitude=24.8, longitude=93.94, location_precision="FACILITY")
 
     add_distance_metadata([first, second], origin=(24.9, 93.95), location_mode="device")
 
-    assert first.distance_km is None
-    assert second.distance_km is None
-    assert "share the same source coordinates" in (first.distance_unavailable_reason or "")
-    assert "share the same source coordinates" in (second.distance_unavailable_reason or "")
+    assert first.distance_km is not None and first.distance_km == second.distance_km
+    assert first.distance_is_approximate and second.distance_is_approximate
+    assert first.distance_unavailable_reason is None
 
 
 def test_distinct_facilities_with_distinct_coordinates_get_independent_distances():
@@ -271,13 +271,11 @@ def test_distinct_facilities_with_distinct_coordinates_get_independent_distances
     assert first.distance_km != second.distance_km
 
 
-def test_shared_coordinates_are_not_used_as_individual_facility_distances():
+def test_near_identical_coordinates_still_get_distances():
     first = candidate("First facility", latitude=24.800001, longitude=93.940001)
     second = candidate("Second facility", latitude=24.800002, longitude=93.940002)
 
     add_distance_metadata([first, second], origin=(24.9, 93.95), location_mode="device")
 
-    assert first.distance_km is None
-    assert second.distance_km is None
-    assert "share the same source coordinates" in (first.distance_unavailable_reason or "")
-    assert "share the same source coordinates" in (second.distance_unavailable_reason or "")
+    assert first.distance_km is not None
+    assert second.distance_km is not None

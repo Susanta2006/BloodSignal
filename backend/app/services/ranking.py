@@ -47,22 +47,6 @@ def add_distance_metadata(
     location_mode: str,
 ) -> None:
     candidate_list = list(candidates)
-    facilities_by_coordinate: dict[tuple[float, float], set[str]] = {}
-    for candidate in candidate_list:
-        bank = candidate.bank
-        if (
-            bank.location_precision != "LOCALITY"
-            and valid_coordinate_pair(bank.latitude, bank.longitude)
-        ):
-            # Directory geocodes often collapse several facilities to one town-centre
-            # point. Coordinates that agree to ~1 m are not distinct facility locations.
-            coordinate_key = (round(bank.latitude, 5), round(bank.longitude, 5))
-            facilities_by_coordinate.setdefault(coordinate_key, set()).add(bank.bank_id)
-
-    shared_coordinates = {
-        coordinate for coordinate, bank_ids in facilities_by_coordinate.items()
-        if len(bank_ids) > 1
-    }
 
     for candidate in candidate_list:
         bank = candidate.bank
@@ -71,25 +55,10 @@ def add_distance_metadata(
             if valid_coordinate_pair(bank.latitude, bank.longitude)
             else None
         )
-        coordinate_key = (
-            (round(bank.latitude, 5), round(bank.longitude, 5))
-            if destination is not None else None
-        )
-        if bank.location_precision == "LOCALITY":
-            distance = None
-            unavailable_reason = (
-                "Distance is unavailable because the coordinates identify a town/district-centre, "
-                "not this facility."
-            )
-        elif coordinate_key in shared_coordinates:
-            distance = None
-            unavailable_reason = (
-                "Distance is unavailable because multiple facilities share the same source coordinates; "
-                "their individual locations cannot be distinguished."
-            )
-        else:
-            distance = haversine_distance_km(origin, destination)
-            unavailable_reason = None
+        # Facility coordinates (source or geocoded) and locality-level geocodes both give a
+        # straight-line distance. Locality results are flagged approximate, never exact.
+        distance = haversine_distance_km(origin, destination)
+        unavailable_reason = None
 
         if distance is not None:
             candidate.distance_km = round(distance, 3)
