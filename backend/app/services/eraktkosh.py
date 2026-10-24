@@ -265,7 +265,6 @@ class ERaktKoshAdapter:
             if self._geocoder and self._geocoder.enabled and banks:
                 import time as _time
                 deadline = _time.monotonic() + self._geocoder_time_budget_s
-                relevant_ids = {r.bank_source_id for r in selected}
                 updated_banks = []
                 count = 0
                 for bank in banks:
@@ -280,7 +279,7 @@ class ERaktKoshAdapter:
                     needs_geocoding = (
                         not valid_coordinate_pair or bank.location_precision == "LOCALITY"
                     )
-                    if (bank.bank_id in relevant_ids and needs_geocoding and
+                    if (needs_geocoding and
                             count < self._geocoder_candidate_limit and _time.monotonic() < deadline):
                         count += 1
                         try:
