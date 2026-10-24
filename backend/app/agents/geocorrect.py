@@ -6,14 +6,14 @@ import os
 import re
 from typing import Any
 import redis.asyncio as redis
-import google.generativeai as genai
+from google import genai
 
 log = logging.getLogger("geocorrect_agent")
 
 class GeoCorrectAgent:
     """
-    An agentic geocoding correction and parsing layer backed by Redis cache 
-    and Gemini LLM fallback for all-India hospital name sanitization.
+    An agentic geocoding correction and parsing layer backed by Redis cache,
+    with Gemini 3.5 Flash-Lite as the primary parser and Rule-Based heuristics as fallback.
     """
     def __init__(
         self, 
@@ -25,13 +25,13 @@ class GeoCorrectAgent:
         self._ttl = ttl_seconds
         self._redis_client: redis.Redis | None = None
         
-        # Configure Gemini API
+        # Initialize Gemini Client
         api_key = gemini_api_key or os.getenv("GEMINI_API_KEY")
         if api_key:
-            genai.configure(api_key=api_key)
-            # Using current active flash model variants for fast, lightweight reasoning
-            self._model_name = "gemini-3.5-flash-lite"  # Fallback model tier
+            self._client = genai.Client(api_key=api_key)
+            self._model_name = "gemini-3.5-flash-lite"
         else:
+            self._client = None
             self._model_name = None
 
     async def _get_redis(self) -> redis.Redis | None:
@@ -43,12 +43,11 @@ class GeoCorrectAgent:
         return self._redis_client
 
     def _rule_based_sanitize(self, name: str | None, address: str | None, district: str | None, state: str | None) -> str:
-        """Tier 1: Fast rule-based heuristic parsing."""
+        """Fallback Tier: Fast rule-based heuristic parsing."""
         if not name:
             name = ""
         combined = f"{name} {address or ''}"
         
-        # Strip survey/door/floor numbers and corporate legal clutter
         cleaned = re.sub(r'\b(survey|plot|door|room|floor|block|phase|ward|near|opp|opposite|behind)\b.*?(?=,|\b[A-Z][a-z]+\b|$)', '', combined, flags=re.IGNORECASE)
         cleaned = re.sub(r'\b\d+(st|nd|rd|th)?\s*(floor|block|phase|gate)\b', '', cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r'\b(Prop|Pvt|Ltd|Limited|Healthcare|Trust|Society|Co-op|Dept of.*?and)\b', '', cleaned, flags=re.IGNORECASE)
@@ -72,9 +71,9 @@ class GeoCorrectAgent:
         return re.sub(r'\s+', ' ', " ".join(parts)).strip()
 
     async def _gemini_semantic_sanitize(self, raw_name: str, raw_address: str | None, district: str | None, state: str | None) -> str:
-        """Tier 2: Gemini LLM Fallback Agent for complex or heavily-noised facility names."""
-        if not self._model_name:
-            return self._rule_based_sanitize(raw_name, raw_address, district, state)
+        """Primary Tier: Gemini 3.5 Flash-Lite Semantic Parsing Agent."""
+        if not self._client or not self._model_name:
+            raise ValueError("Gemini client not initialized")
             
         prompt = f"""
 You are a precise geographic data extraction agent for Indian healthcare facilities.
@@ -92,17 +91,14 @@ Instructions:
 3. Append the provided District and State cleanly.
 4. Return ONLY the final search string, with no extra conversational text or quotes.
 """
-        try:
-            # Using asynchronous Gemini model generation
-            model = genai.GenerativeModel(self._model_name)
-            response = await model.generate_content_async(prompt)
-            cleaned_query = response.text.strip().replace('"', '')
-            if cleaned_query:
-                return cleaned_query
-        except Exception as exc:
-            log.warning("Gemini semantic sanitization failed, falling back to rules: %s", exc)
-            
-        return self._rule_based_sanitize(raw_name, raw_address, district, state)
+        response = await self._client.aio.models.generate_content(
+            model=self._model_name,
+            contents=prompt,
+        )
+        cleaned_query = response.text.strip().replace('"', '')
+        if not cleaned_query:
+            raise ValueError("Empty response from Gemini model")
+        return cleaned_query
 
     async def resolve_location(
         self,
@@ -114,13 +110,11 @@ Instructions:
         geocoder: Any
     ) -> tuple[float, float, str] | None:
         """
-        Resolves location using Redis cache -> Rule-based parser -> Gemini LLM fallback -> Geocoder.
-        Caches only successfully resolved location records for the current/searched entities.
+        Resolves location using: Redis cache -> Gemini 3.5 Flash-Lite (Primary) -> Rule-based parser (Fallback) -> Geocoder.
         """
-        # Create a unique cache key based on normalized name and district
         clean_cache_name = re.sub(r'[^a-zA-Z0-9]', '_', name.casefold())
         clean_cache_dist = re.sub(r'[^a-zA-Z0-9]', '_', (district or '').casefold())
-        cache_key = f"geocorrect:v1:{clean_cache_name}:{clean_cache_dist}"
+        cache_key = f"geocorrect:v2:{clean_cache_name}:{clean_cache_dist}"
         
         client = await self._get_redis()
         if client:
@@ -132,9 +126,20 @@ Instructions:
             except Exception as exc:
                 log.debug("Redis cache read error: %s", exc)
 
-        # Step 1: Try Tier 1 Rule-Based Parsing first (Fast & Free)
-        corrected_query = self._rule_based_sanitize(name, address, district, state)
+        corrected_query = None
         
+        # Step 1: Try Primary Gemini 3.5 Flash-Lite Sanitization
+        if self._client:
+            try:
+                corrected_query = await self._gemini_semantic_sanitize(name, address, district, state)
+            except Exception as exc:
+                log.debug("Gemini primary sanitization failed, falling back to rules: %s", exc)
+
+        # Step 2: Fallback to Rule-Based Parsing if Gemini fails or is unconfigured
+        if not corrected_query:
+            corrected_query = self._rule_based_sanitize(name, address, district, state)
+
+        # Step 3: Attempt Geocoding with the resolved query
         found = None
         try:
             found = await geocoder.geocode(
@@ -143,28 +148,12 @@ Instructions:
                 city=None,
                 district=district,
                 state=state,
-                budget_s=2.0
+                budget_s=2.5
             )
         except Exception as exc:
-            log.debug("Rule-based geocode attempt failed: %s", exc)
+            log.warning("Geocoding lookup failed for query '%s': %s", corrected_query, exc)
 
-        # Step 2: If Rule-Based fails or returns no coordinates, escalate to Tier 2 (Gemini LLM Agent)
-        if not found and self._model_name:
-            log.info("Escalating geocoding correction to Gemini agent for: %s", name)
-            corrected_query = await self._gemini_semantic_sanitize(name, address, district, state)
-            try:
-                found = await geocoder.geocode(
-                    name=corrected_query,
-                    address=address,
-                    city=None,
-                    district=district,
-                    state=state,
-                    budget_s=2.5
-                )
-            except Exception as exc:
-                log.warning("Gemini-backed geocode attempt failed: %s", exc)
-
-        # Step 3: Write successfully resolved result to Redis cache
+        # Step 4: Write successfully resolved result to Redis cache
         if found and client:
             try:
                 lat, lon, precision = found
