@@ -103,6 +103,27 @@ def test_bulk_request_uses_only_state_and_component_ids_and_no_credentials():
     assert all(r.blood_group == "O-" for r in result.records)
 
 
+def test_facility_geocoding_fallback_attaches_verified_coordinates_to_stock_result():
+    class FixedGeocoder:
+        enabled = True
+
+        async def geocode(self, **kwargs):
+            assert kwargs["name"] == "Indira Gandhi Memorial (Igm) Hospital"
+            assert kwargs["district"] == "Agartala"
+            assert kwargs["state"] == "Tripura"
+            return 23.8466, 91.2868, "FACILITY"
+
+    result = asyncio.run(adapter(
+        lambda request: httpx.Response(200, json=FIXTURE),
+        geocoder=FixedGeocoder(),
+    ).fetch_stock([], "O-", "prbc", "Agartala", state="Tripura"))
+
+    bank = result.banks[0]
+    assert (bank.latitude, bank.longitude) == (23.8466, 91.2868)
+    assert bank.location_precision == "FACILITY"
+    assert "OpenStreetMap/Nominatim" in (bank.location_note or "")
+
+
 def test_empty_array_is_valid_empty_result():
     result = asyncio.run(adapter(lambda request: httpx.Response(200, json=[])).fetch_stock(
         [], "O-", "prbc", "Agartala", state="Tripura"))
