@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildFacilityQueryText,
   buildGoogleMapsEmbedUrl,
+  buildGoogleMapsTextRouteEmbedUrl,
+  buildTextDirectionsUrl,
   buildDirectionsUrl,
   hasReliableFacilityDestination,
   travelModes,
@@ -141,5 +144,47 @@ describe("Google Maps destination URLs", () => {
       false,
     );
     expect(buildDirectionsUrl({}, "driving")).toBeNull();
+  });
+
+  it("builds the facility query from name, address and locality without duplicates", () => {
+    expect(
+      buildFacilityQueryText({
+        name: "Blood Centre",
+        address: "MG Road",
+        city: "Imphal",
+        district: "Imphal",
+        state: "Manipur",
+      }),
+    ).toBe("Blood Centre, MG Road, Imphal, Manipur, India");
+    expect(buildFacilityQueryText({ address: "Unavailable" })).toBe("India");
+    expect(buildFacilityQueryText({})).toBe("India");
+  });
+
+  it("embeds a text-destination route only when a starting point exists", () => {
+    const facility = { name: "Blood Centre", address: "MG Road", state: "Manipur" };
+    expect(buildGoogleMapsTextRouteEmbedUrl(facility)).toBeNull();
+    const fromGps = new URL(
+      buildGoogleMapsTextRouteEmbedUrl(facility, { latitude: 24.8, longitude: 93.9 }, null, "walking")!,
+    ).searchParams;
+    expect(fromGps.get("saddr")).toBe("24.8,93.9");
+    expect(fromGps.get("daddr")).toBe("Blood Centre, MG Road, Manipur, India");
+    expect(fromGps.get("dirflg")).toBe("w");
+    const fromLabel = new URL(
+      buildGoogleMapsTextRouteEmbedUrl(facility, null, "Imphal West, Manipur, India")!,
+    ).searchParams;
+    expect(fromLabel.get("saddr")).toBe("Imphal West, Manipur, India");
+    expect(fromLabel.get("dirflg")).toBe("d");
+  });
+
+  it("opens text directions with the origin omitted so the device's own location is used", () => {
+    const facility = { name: "Blood Centre", city: "Imphal", state: "Manipur" };
+    const noOrigin = new URL(buildTextDirectionsUrl(facility, "driving")!);
+    expect(noOrigin.origin + noOrigin.pathname).toBe("https://www.google.com/maps/dir/");
+    expect(noOrigin.searchParams.get("destination")).toBe("Blood Centre, Imphal, Manipur, India");
+    expect(noOrigin.searchParams.get("travelmode")).toBe("driving");
+    expect(noOrigin.searchParams.has("origin")).toBe(false);
+    const withOrigin = new URL(buildTextDirectionsUrl(facility, "transit", "24.8,93.9")!);
+    expect(withOrigin.searchParams.get("origin")).toBe("24.8,93.9");
+    expect(withOrigin.searchParams.get("travelmode")).toBe("transit");
   });
 });

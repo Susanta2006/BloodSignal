@@ -68,6 +68,7 @@ import { facilityDistanceKm, validLatLon } from "@/features/blood-search/distanc
 import { componentOptions, componentDisplayName, eraktkoshStates } from "@/features/blood-search/eraktkosh-catalog";
 import { districtsByState, nearbyDistrictSuggestions } from "@/features/blood-search/district-catalog";
 import { BloodBankMap, type FacilityMapItem } from "@/features/blood-search/BloodBankMap";
+import { getNativeLocation, isNativeLocationAvailable } from "@/features/blood-search/native-location";
 import {
   buildDirectionsUrl,
   hasReliableFacilityDestination,
@@ -946,9 +947,16 @@ function BloodSearchPage() {
     setMessage("Requesting your device location. Keep this page open while the browser determines it.");
     setFormErrors((current) => ({ ...current, location: "" }));
 
+    // The device's native location service (available inside a native shell such as
+    // Capacitor) is tried alongside the browser's Geolocation; whichever returns a
+    // valid position first is used. In a plain browser this is false and nothing
+    // below changes.
+    const nativeAvailable = isNativeLocationAvailable();
+    const browserAvailable = window.isSecureContext && Boolean(navigator.geolocation);
+
     // Geolocation requires a secure context. localhost and 127.0.0.1 are
     // trusted for development; plain HTTP LAN IPs and hostnames are not.
-    if (!window.isSecureContext) {
+    if (!window.isSecureContext && !nativeAvailable) {
       setUseDevice(false);
       setDeviceLocationStatus("error");
       setMessage(
@@ -956,7 +964,7 @@ function BloodSearchPage() {
       );
       return;
     }
-    if (!navigator.geolocation) {
+    if (!navigator.geolocation && !nativeAvailable) {
       setUseDevice(false);
       setDeviceLocationStatus("error");
       setMessage("This browser does not support device location. Choose the state and district below.");
@@ -966,8 +974,15 @@ function BloodSearchPage() {
     let settled = false;
     let fallbackStarted = false;
     let watchdog = 0;
+    let nativePending = nativeAvailable;
+    let pendingBrowserReason: string | null = null;
     const finishWithError = (reason: string) => {
       if (settled || requestId !== deviceLocationRequestId.current) return;
+      // Give the native location service its chance before reporting a browser failure.
+      if (nativePending) {
+        pendingBrowserReason = reason;
+        return;
+      }
       settled = true;
       window.clearTimeout(watchdog);
       setUseDevice(false);
@@ -982,30 +997,34 @@ function BloodSearchPage() {
       finishWithError("The browser did not return a location within 32 seconds. Check site permission and system Location Services, then retry.");
     }, 32000);
 
+    const acceptCoordinates = (coordinates: { latitude: number; longitude: number }) => {
+      if (settled || requestId !== deviceLocationRequestId.current) return;
+      if (!validLatLon(coordinates)) {
+        finishWithError("The device returned invalid coordinates. Check system Location Services, then retry.");
+        return;
+      }
+      settled = true;
+      window.clearTimeout(watchdog);
+      setLocation({
+        mode: "device",
+        ...coordinates,
+        country: "IN",
+        location_consent: true,
+      });
+      setDeviceLocationStatus("ready");
+      setFormErrors((current) => ({ ...current, location: "" }));
+      setMessage("Device location is ready for this search only.");
+    };
+
     const requestPosition = (highAccuracy: boolean, timeout: number, maximumAge: number) => {
       try {
         navigator.geolocation.getCurrentPosition(
           (position) => {
             if (settled || requestId !== deviceLocationRequestId.current) return;
-            const coordinates = {
+            acceptCoordinates({
               latitude: position.coords.latitude,
               longitude: position.coords.longitude,
-            };
-            if (!validLatLon(coordinates)) {
-              finishWithError("The browser returned invalid coordinates. Check system Location Services, then retry.");
-              return;
-            }
-            settled = true;
-            window.clearTimeout(watchdog);
-            setLocation({
-              mode: "device",
-              ...coordinates,
-              country: "IN",
-              location_consent: true,
             });
-            setDeviceLocationStatus("ready");
-            setFormErrors((current) => ({ ...current, location: "" }));
-            setMessage("Device location is ready for this search only.");
           },
           (error) => {
             if (settled || requestId !== deviceLocationRequestId.current) return;
@@ -1039,7 +1058,27 @@ function BloodSearchPage() {
     // Prefer the browser's network-assisted location first. This works better on
     // laptops and desktops that do not have a GPS receiver; use high accuracy only
     // as a fallback when the browser cannot provide an approximate position.
-    requestPosition(false, 18000, 120000);
+    if (browserAvailable) requestPosition(false, 18000, 120000);
+
+    if (nativeAvailable) {
+      void getNativeLocation().then((coordinates) => {
+        nativePending = false;
+        if (settled || requestId !== deviceLocationRequestId.current) return;
+        if (coordinates) {
+          acceptCoordinates(coordinates);
+          return;
+        }
+        // Native service gave nothing: report the browser's failure if it already
+        // failed, or the native-only failure when the browser was never usable.
+        if (pendingBrowserReason !== null) {
+          finishWithError(pendingBrowserReason);
+        } else if (!browserAvailable) {
+          finishWithError(
+            "The device's location service did not return a position. Check that Location Services are on and that BloodSignal has location permission.",
+          );
+        }
+      });
+    }
   };
 
   const validateForm = (): SearchRequest | null => {

@@ -44,6 +44,7 @@ export function facilityDistanceKm(
   destination: LatLon | null | undefined,
   precision?: FacilityLocationPrecision,
 ): number | null {
-  if (precision === "LOCALITY") return null;
+  // Calculate distance even for town-centre coordinates (LOCALITY).
+  // Distance is straight-line and approximate, never road distance.
   return haversineDistanceKm(origin, destination);
 }

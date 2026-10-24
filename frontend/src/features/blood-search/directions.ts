@@ -68,6 +68,84 @@ export function buildGoogleMapsSearchEmbedUrl(
   return `https://maps.google.com/maps?${params.toString()}`;
 }
 
+/**
+ * Name + address + locality as one Google Maps place query, e.g.
+ * "AGMC & GBP Hospital, GB Bazar, Agartala, West Tripura, Tripura, India".
+ * Shared by the search preview and the text-destination route so both resolve
+ * the same place.
+ */
+export function buildFacilityQueryText(
+  facility: FacilityDestination,
+): string | null {
+  const parts = [
+    facility.name,
+    facility.address,
+    facility.city,
+    facility.district,
+    facility.state,
+    "India",
+  ]
+    .filter(usableText)
+    .map((value) => value.trim())
+    .filter((value, index, all) => all.indexOf(value) === index);
+  return parts.length === 0 ? null : parts.join(", ");
+}
+
+/**
+ * Embedded Google Maps route whose destination is the facility's name and
+ * address (not coordinates). Used when no facility-level coordinates exist, or
+ * when the only coordinates are a town/district centre. Returns null when there
+ * is no usable starting point or no usable destination text.
+ */
+export function buildGoogleMapsTextRouteEmbedUrl(
+  facility: FacilityDestination,
+  origin?: LatLon | null,
+  originText?: string | null,
+  travelMode: TravelMode = "driving",
+): string | null {
+  const destination = buildFacilityQueryText(facility);
+  if (!destination) return null;
+  const start = validLatLon(origin)
+    ? `${origin.latitude},${origin.longitude}`
+    : usableText(originText)
+      ? originText.trim()
+      : null;
+  if (!start) return null;
+
+  const directionsFlag =
+    travelMode === "walking" ? "w" : travelMode === "transit" ? "r" : "d";
+  const params = new URLSearchParams({ output: "embed" });
+  params.set("saddr", start);
+  params.set("daddr", destination);
+  params.set("dirflg", directionsFlag);
+  return `https://maps.google.com/maps?${params.toString()}`;
+}
+
+/**
+ * Google Maps directions link to the facility's name and address. When no
+ * origin is given the link omits it, so Google Maps (the native app on phones)
+ * starts from the device's own current location.
+ */
+export function buildTextDirectionsUrl(
+  facility: FacilityDestination,
+  travelMode: TravelMode,
+  origin?: string,
+): string | null {
+  const destination = buildFacilityQueryText(facility);
+  if (!destination) return null;
+  const googleMode =
+    travelMode === "walking"
+      ? "walking"
+      : travelMode === "transit"
+        ? "transit"
+        : "driving";
+  const params = new URLSearchParams({ api: "1" });
+  params.set("destination", destination);
+  params.set("travelmode", googleMode);
+  if (usableText(origin)) params.set("origin", origin.trim());
+  return `https://www.google.com/maps/dir/?${params.toString()}`;
+}
+
 const INVALID_VALUES = new Set([
   "unknown",
   "unavailable",

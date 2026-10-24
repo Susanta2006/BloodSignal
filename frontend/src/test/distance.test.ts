@@ -28,14 +28,14 @@ describe("straight-line distance calculations", () => {
     expect(validLatLon({ latitude: "24.8" as unknown as number, longitude: 93.9 })).toBe(false);
   });
 
-  it("does not calculate facility distance from a locality-centre pin", () => {
+  it("calculates distance even from a locality-centre pin (straight-line, with caution)", () => {
     expect(
       facilityDistanceKm(
         { latitude: 24.8, longitude: 93.9 },
         { latitude: 24.81, longitude: 93.91 },
         "LOCALITY",
       ),
-    ).toBeNull();
+    ).toBeCloseTo(1.502, 2);
   });
 
   it("uses the shortest longitude difference across the antimeridian", () => {

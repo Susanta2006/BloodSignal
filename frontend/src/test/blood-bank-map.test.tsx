@@ -117,7 +117,44 @@ describe("blood bank map selection", () => {
     expect(screen.getByRole("option", { name: "Bank B" })).toBeInTheDocument();
   });
 
-  it("shows a facility search preview when coordinates are not available", () => {
+  it("shows a facility search preview when coordinates and a starting point are both unavailable", () => {
+    render(
+      <BloodBankMap
+        facilities={[
+          {
+            id: "unlocated-bank",
+            name: "AGMC & GBP Hospital",
+            address: "GB Bazar, P.O Kunjavan",
+            city: "Agartala",
+            district: "West Tripura",
+            state: "Tripura",
+          },
+        ]}
+      />,
+    );
+
+    const map = screen.getByTitle(
+      "Google Maps search for AGMC & GBP Hospital",
+    ) as HTMLIFrameElement;
+    const params = new URL(map.src).searchParams;
+    expect(params.get("q")).toContain("AGMC & GBP Hospital");
+    expect(params.get("q")).toContain("GB Bazar, P.O Kunjavan");
+    expect(params.get("q")).toContain("West Tripura");
+    expect(screen.getByText(/not a confirmed pin/)).toBeInTheDocument();
+    expect(
+      screen.getByText("Unavailable—coordinates missing or invalid"),
+    ).toBeInTheDocument();
+    // Directions without an origin start from the device's own current location.
+    const link = screen.getByRole("link", {
+      name: "Open driving directions in Google Maps",
+    });
+    const href = new URL(link.getAttribute("href")!);
+    expect(href.pathname).toBe("/maps/dir/");
+    expect(href.searchParams.get("destination")).toContain("AGMC & GBP Hospital");
+    expect(href.searchParams.has("origin")).toBe(false);
+  });
+
+  it("routes from the shared device location to a facility known only by name and address", () => {
     render(
       <BloodBankMap
         facilities={[
@@ -135,18 +172,67 @@ describe("blood bank map selection", () => {
     );
 
     const map = screen.getByTitle(
-      "Google Maps search for AGMC & GBP Hospital",
+      "Google Maps route to AGMC & GBP Hospital",
     ) as HTMLIFrameElement;
     const params = new URL(map.src).searchParams;
-    expect(params.get("q")).toContain("AGMC & GBP Hospital");
-    expect(params.get("q")).toContain("West Tripura");
-    expect(params.get("q")).toContain("Tripura");
-    expect(screen.getByText(/not a confirmed pin/)).toBeInTheDocument();
+    expect(params.get("saddr")).toBe("23.8357,91.27");
+    expect(params.get("daddr")).toBe(
+      "AGMC & GBP Hospital, GB Bazar, P.O Kunjavan, Agartala, West Tripura, Tripura, India",
+    );
+    expect(params.get("dirflg")).toBe("d");
+    expect(screen.getByText("23.835700, 91.270000")).toBeInTheDocument();
     expect(
-      screen.getByText("Unavailable until facility coordinates are verified"),
+      screen.getByText(/Facility coordinates are not on file, so the route goes/),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("link", { name: "Search this facility in Google Maps" }),
-    ).toBeInTheDocument();
+    const href = new URL(
+      screen
+        .getByRole("link", { name: "Open driving directions in Google Maps" })
+        .getAttribute("href")!,
+    );
+    expect(href.searchParams.get("origin")).toBe("23.8357,91.27");
+  });
+
+  it("routes from the selected district to a facility known only by name and address", () => {
+    render(
+      <BloodBankMap
+        facilities={[
+          { id: "b", name: "Blood Centre", address: "MG Road", city: "Imphal", state: "Manipur" },
+        ]}
+        originLabel="Imphal West, Manipur, India"
+      />,
+    );
+    const params = new URL(
+      (screen.getByTitle("Google Maps route to Blood Centre") as HTMLIFrameElement).src,
+    ).searchParams;
+    expect(params.get("saddr")).toBe("Imphal West, Manipur, India");
+    expect(params.get("daddr")).toBe("Blood Centre, MG Road, Imphal, Manipur, India");
+  });
+
+  it("does not route to a town/district-centre coordinate; it uses the facility name and address", () => {
+    render(
+      <BloodBankMap
+        facilities={[
+          {
+            id: "locality-bank",
+            name: "District Blood Centre",
+            address: "Hospital Road",
+            city: "Imphal",
+            state: "Manipur",
+            latitude: 24.8,
+            longitude: 93.94,
+            location_precision: "LOCALITY",
+          },
+        ]}
+        origin={{ latitude: 24.79, longitude: 93.89 }}
+      />,
+    );
+    const params = new URL(
+      (screen.getByTitle("Google Maps route to District Blood Centre") as HTMLIFrameElement).src,
+    ).searchParams;
+    expect(params.get("daddr")).toBe(
+      "District Blood Centre, Hospital Road, Imphal, Manipur, India",
+    );
+    expect(params.get("daddr")).not.toBe("24.8,93.94");
+    expect(screen.getByText(/only a town\/district centre/)).toBeInTheDocument();
   });
 });

@@ -8,6 +8,8 @@ import {
   buildDirectionsUrl,
   buildGoogleMapsEmbedUrl,
   buildGoogleMapsSearchEmbedUrl,
+  buildGoogleMapsTextRouteEmbedUrl,
+  buildTextDirectionsUrl,
   type TravelMode,
 } from "@/features/blood-search/directions";
 
@@ -76,19 +78,27 @@ export function BloodBankMap({
   }
 
   const hasCoordinates = validCoordinates(selected.latitude ?? NaN, selected.longitude ?? NaN);
+  // A town/district-centre coordinate is not the facility. Route to it by name and
+  // address instead, exactly like a facility that has no coordinates at all.
+  const facilityLevelPin =
+    hasCoordinates && selected.location_precision !== "LOCALITY";
   const destination = { ...selected };
-  const embedUrl = hasCoordinates
+  const textRouteUrl = facilityLevelPin
+    ? null
+    : buildGoogleMapsTextRouteEmbedUrl(destination, origin, originLabel, travelMode);
+  const showsTextRoute = textRouteUrl !== null;
+  const embedUrl = facilityLevelPin
     ? buildGoogleMapsEmbedUrl(destination, origin, originLabel, travelMode)
-    : buildGoogleMapsSearchEmbedUrl(destination);
-  const googleMapsUrl = buildDirectionsUrl(
-    destination,
-    travelMode,
-    hasCoordinates
-      ? validLatLon(origin)
-        ? `${origin.latitude},${origin.longitude}`
-        : (originLabel ?? undefined)
-      : undefined,
-  );
+    : (textRouteUrl ?? buildGoogleMapsSearchEmbedUrl(destination));
+  const originParam = validLatLon(origin)
+    ? `${origin.latitude},${origin.longitude}`
+    : (originLabel ?? undefined);
+  const googleMapsUrl = facilityLevelPin
+    ? buildDirectionsUrl(destination, travelMode, originParam)
+    : buildTextDirectionsUrl(destination, travelMode, originParam);
+  const hasRoute =
+    showsTextRoute ||
+    (facilityLevelPin && (validLatLon(origin) || Boolean(originLabel)));
   const straightLineKm = hasCoordinates
     ? facilityDistanceKm(
         origin,
@@ -119,7 +129,7 @@ export function BloodBankMap({
           <iframe
             key={embedUrl}
             title={
-              hasCoordinates
+              facilityLevelPin || showsTextRoute
                 ? `Google Maps route to ${selected.name}`
                 : `Google Maps search for ${selected.name}`
             }
@@ -136,7 +146,9 @@ export function BloodBankMap({
       </p>
       {selected.location_precision === "LOCALITY" ? (
         <p className="text-sm font-medium text-amber-700">
-          Approximate location: town/district centre, not the facility.
+          Coordinates on file are only a town/district centre, not the facility. The
+          straight-line distance shown is from your location to that centre, not to
+          the facility itself. Google Maps routing uses the facility name and address.
         </p>
       ) : null}
       {selected.location_note ? (
@@ -144,24 +156,38 @@ export function BloodBankMap({
           {selected.location_note}
         </p>
       ) : null}
-      {!hasCoordinates ? (
+      {!hasCoordinates && showsTextRoute ? (
         <p className="text-sm font-medium text-amber-700">
-          Facility coordinates are not verified. This is a name-and-area search
-          preview, not a confirmed pin; distance and route are unavailable until
-          the search service returns facility-level coordinates.
+          Facility coordinates are not on file, so the route goes to the facility
+          by its name and address as Google Maps resolves them. Check the
+          destination before travelling; straight-line distance is unavailable.
+        </p>
+      ) : null}
+      {!hasCoordinates && !showsTextRoute ? (
+        <p className="text-sm font-medium text-amber-700">
+          Facility coordinates are not verified. This is a name-and-address search
+          preview, not a confirmed pin. Share device location or choose a district
+          to show a route from your starting point.
         </p>
       ) : null}
       <p className="text-xs leading-5 text-muted-foreground">
-        {!hasCoordinates
-          ? "Google Maps is searching by facility name and address. Check the result before travelling; this preview does not confirm the exact facility location."
+        {!facilityLevelPin
+          ? showsTextRoute
+            ? validLatLon(origin)
+              ? "Google Maps is routing from your shared device location to the facility using its name and address."
+              : `Google Maps is routing from ${originLabel} to the facility using its name and address. This is a district-level starting area, not your precise location.`
+            : "Google Maps is searching by facility name and address. Check the result before travelling; this preview does not confirm the exact facility location."
           : validLatLon(origin)
-          ? "The map shows your shared device location and the selected facility. Open directions for Google Maps' current route options."
-          : originLabel
-            ? `Google Maps directions start from ${originLabel}. This is a district-level starting area, not your precise location.`
-            : "The map shows the facility at its source coordinates. Share device location to show a route from your current location."}{" "}
-        {hasCoordinates
+            ? "The map shows your shared device location and the selected facility. Open directions for Google Maps' current route options."
+            : originLabel
+              ? `Google Maps directions start from ${originLabel}. This is a district-level starting area, not your precise location.`
+              : "The map shows the facility at its source coordinates. Share device location to show a route from your current location."}{" "}
+        {hasRoute
+          ? "Where Google Maps offers alternative routes, compare their distances and choose the shortest. "
+          : "Opening directions in Google Maps starts from your device's own current location. "}
+        {facilityLevelPin
           ? "Map imagery and routing are provided by Google Maps."
-          : "Map search results are provided by Google Maps."}{" "}
+          : "Map search results and routing are provided by Google Maps."}{" "}
         Straight-line distance is not road distance or travel time.
       </p>
       <dl className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
@@ -173,7 +199,7 @@ export function BloodBankMap({
               : "Not available"}
           </dd>
         </div>
-        {hasCoordinates && validLatLon(origin) ? (
+        {hasRoute && validLatLon(origin) ? (
           <div>
             <dt className="font-medium text-foreground">
               Your shared location
@@ -183,7 +209,7 @@ export function BloodBankMap({
             </dd>
           </div>
         ) : null}
-        {hasCoordinates && !validLatLon(origin) && originLabel ? (
+        {hasRoute && !validLatLon(origin) && originLabel ? (
           <div>
             <dt className="font-medium text-foreground">Starting area</dt>
             <dd>{originLabel}</dd>
@@ -195,10 +221,8 @@ export function BloodBankMap({
           </dt>
           <dd>
             {straightLineKm === null
-              ? hasCoordinates
-                ? "Unavailable from locality or ambiguous coordinates"
-                : "Unavailable until facility coordinates are verified"
-              : `${straightLineKm.toFixed(2)} km`}
+              ? "Unavailable—coordinates missing or invalid"
+              : `${straightLineKm.toFixed(2)} km (straight-line, not road distance)`}
           </dd>
         </div>
       </dl>
@@ -209,9 +233,7 @@ export function BloodBankMap({
           target="_blank"
           rel="noreferrer"
         >
-          {hasCoordinates
-            ? `Open ${travelMode} directions in Google Maps`
-            : "Search this facility in Google Maps"}
+          {`Open ${travelMode} directions in Google Maps`}
         </a>
       ) : null}
     </div>
