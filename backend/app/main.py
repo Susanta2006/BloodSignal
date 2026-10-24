@@ -32,7 +32,7 @@ from app.services.geocoding import NominatimGeocoder
 from app.services.routes import GoogleRoutes, NullRoutes, RoutesClient
 from app.services.stock_source import DemoStockAdapter, StockSourceAdapter
 from app.services.store import MemoryStore
-
+import redis.asyncio as redis
 
 @dataclass
 class Container:
