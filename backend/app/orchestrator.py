@@ -258,7 +258,7 @@ class Orchestrator:
             return
 
         # Bounded multi-district fallback is part of the live search pipeline, not a UI-only
-        # suggestion. It runs only when current local inventory cannot cover the full request.
+        # suggestion. It runs when no single local facility can meet the requested quantity.
         # The configured geography map is still marked unverified; each returned bank retains its
         # source-provided district/address and the UI must not infer road distance from this scope.
         areas_checked = [req.district] if req.district else []
@@ -295,7 +295,7 @@ class Orchestrator:
 
             local_usable = usable_by_bank(result.records)
             local_total = sum(local_usable.values())
-            if local_total < req.quantity:
+            if not any(quantity >= req.quantity for quantity in local_usable.values()):
                 already_bank_ids = {bank.bank_id for bank in banks}
                 already_place_ids = {bank.provider_place_id for bank in banks if bank.provider_place_id}
                 seen_record_keys = {
@@ -308,7 +308,10 @@ class Orchestrator:
                 adjacent_banks = []
                 contributed_usable = False
                 for district_name in nearby_districts(req.district)[:3]:
-                    if sum(usable_by_bank([*result.records, *neighboring_records]).values()) >= req.quantity:
+                    if any(
+                        quantity >= req.quantity
+                        for quantity in usable_by_bank([*result.records, *neighboring_records]).values()
+                    ):
                         break
                     areas_checked.append(district_name)
                     new_banks = []
@@ -374,7 +377,7 @@ class Orchestrator:
                     usable_after = usable_by_bank([*result.records, *neighboring_records])
                     if sum(usable_after.values()) > local_total:
                         contributed_usable = True
-                    if sum(usable_after.values()) >= req.quantity:
+                    if any(quantity >= req.quantity for quantity in usable_after.values()):
                         break
 
                 if neighboring_records and contributed_usable:

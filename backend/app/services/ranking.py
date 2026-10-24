@@ -8,7 +8,7 @@ from typing import Iterable
 from app.schemas import Candidate, EvidenceState, MatchState, Section
 
 EARTH_RADIUS_KM = 6371.0088
-RANKING_VERSION = "availability-nearest-first-2.0.0"
+RANKING_VERSION = "availability-freshness-nearest-first-2.1.0"
 
 
 def valid_coordinate_pair(latitude: object, longitude: object) -> bool:
@@ -46,14 +46,51 @@ def add_distance_metadata(
     origin: tuple[float, float] | None,
     location_mode: str,
 ) -> None:
-    for candidate in candidates:
+    candidate_list = list(candidates)
+    facilities_by_coordinate: dict[tuple[float, float], set[str]] = {}
+    for candidate in candidate_list:
+        bank = candidate.bank
+        if (
+            bank.location_precision != "LOCALITY"
+            and valid_coordinate_pair(bank.latitude, bank.longitude)
+        ):
+            # Directory geocodes often collapse several facilities to one town-centre
+            # point. Coordinates that agree to ~1 m are not distinct facility locations.
+            coordinate_key = (round(bank.latitude, 5), round(bank.longitude, 5))
+            facilities_by_coordinate.setdefault(coordinate_key, set()).add(bank.bank_id)
+
+    shared_coordinates = {
+        coordinate for coordinate, bank_ids in facilities_by_coordinate.items()
+        if len(bank_ids) > 1
+    }
+
+    for candidate in candidate_list:
         bank = candidate.bank
         destination = (
             (bank.latitude, bank.longitude)
             if valid_coordinate_pair(bank.latitude, bank.longitude)
             else None
         )
-        distance = haversine_distance_km(origin, destination)
+        coordinate_key = (
+            (round(bank.latitude, 5), round(bank.longitude, 5))
+            if destination is not None else None
+        )
+        if bank.location_precision == "LOCALITY":
+            distance = None
+            unavailable_reason = (
+                "Distance is unavailable because the coordinates identify a town/district-centre, "
+                "not this facility."
+            )
+        elif coordinate_key in shared_coordinates:
+            distance = None
+            unavailable_reason = (
+                "Distance is unavailable because multiple facilities share the same source coordinates; "
+                "their individual locations cannot be distinguished."
+            )
+        else:
+            distance = haversine_distance_km(origin, destination)
+            unavailable_reason = None
+
         if distance is not None:
             candidate.distance_km = round(distance, 3)
             candidate.distance_type = "straight_line"
@@ -64,7 +101,9 @@ def add_distance_metadata(
             candidate.distance_km = None
             candidate.distance_type = None
             candidate.distance_is_approximate = False
-            if origin is None or not valid_coordinate_pair(*origin):
+            if unavailable_reason is not None:
+                reason = unavailable_reason
+            elif origin is None or not valid_coordinate_pair(*origin):
                 reason = (
                     "Exact distance is unavailable because the search uses a district or manual location."
                     if location_mode == "manual"
@@ -77,7 +116,17 @@ def add_distance_metadata(
 
 def _tier(candidate: Candidate) -> tuple[int, str]:
     if candidate.source_type == "demo":
-        return 4, "Synthetic inventory is demo-only and is not ranked as real stock."
+        if candidate.section == Section.A_ELIGIBLE and candidate.match_state == MatchState.MATCHED_REPORTED:
+            return 4, "Synthetic demo-only inventory reports a full match; it is not verified real stock."
+        if (
+            candidate.section == Section.C_INSUFFICIENT
+            and candidate.match_state == MatchState.INSUFFICIENT
+            and candidate.evidence_state == EvidenceState.FRESH
+        ):
+            return 5, "Synthetic demo inventory reports partial quantity; it is not verified real stock."
+        if candidate.section == Section.D_MISMATCH:
+            return 7, "Synthetic demo inventory does not match the requested blood group or component."
+        return 6, "Synthetic inventory is demo-only and is not verified real stock."
     if candidate.section == Section.A_ELIGIBLE and candidate.match_state == MatchState.MATCHED_REPORTED:
         return 1, "Fresh live inventory evidence confirms the requested component and quantity."
     if (
@@ -100,7 +149,7 @@ def _freshness_score(candidate: Candidate, now: datetime, freshness_hours: int) 
     age_hours = (now - updated).total_seconds() / 3600
     if age_hours < 0:
         return 0.0
-    return 1.0 / (1.0 + age_hours / max(freshness_hours, 1))
+    return round(1.0 / (1.0 + age_hours / max(freshness_hours, 1)), 6)
 
 
 def _quantity_score(candidate: Candidate, requested_quantity: int) -> float:
@@ -121,11 +170,11 @@ def rank_candidates(
     quantity_weight: float,
     distance_weight: float,
 ) -> None:
-    """Rank by strict evidence tier, then configurable normalized evidence/distance score.
+    """Rank by evidence/availability, then freshness and nearest validated distance.
 
-    Within each tier the score is the weighted sum of freshness, requested-quantity
-    coverage, and proximity (1 / (1 + km / distance_scale_km)). Missing values score 0.
-    Ties use fresher timestamp, quantity, distance, case-folded facility name, then ID.
+    The normalized score remains available as supporting metadata. Ordering is explicit:
+    evidence tier, freshness, largest partial quantity when applicable, then nearest
+    validated straight-line distance. Missing distances sort after known distances.
     """
     total_weight = freshness_weight + quantity_weight + distance_weight
     if total_weight <= 0:
@@ -152,12 +201,23 @@ def rank_candidates(
             else "distance was unavailable and did not affect the score"
         )
         candidate.ranking_explanation = (
-            f"Tier {tier}. {tier_reason} Within this tier, the weighted score uses source freshness, "
-            f"reported quantity, and {distance_reason}."
+            f"Tier {tier}. {tier_reason} Within this tier, ranking prioritizes source freshness, "
+            f"then proximity; {distance_reason}. Partial positive-stock records use reported quantity "
+            "before proximity. The weighted evidence score is also included for reference."
+        )
+        partial_quantity = (
+            -candidate.quantity_reported
+            if (
+                candidate.section == Section.C_INSUFFICIENT
+                and candidate.match_state == MatchState.INSUFFICIENT
+                and candidate.quantity_reported is not None
+            )
+            else 0.0
         )
         prepared.append((
-            (tier, -score, -fresh, -quantity,
+            (tier, -fresh, partial_quantity,
              candidate.distance_km if candidate.distance_km is not None else math.inf,
+             -quantity,
              candidate.bank.name.casefold(), candidate.bank.bank_id),
             candidate,
         ))

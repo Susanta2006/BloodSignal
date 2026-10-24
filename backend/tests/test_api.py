@@ -370,14 +370,31 @@ def test_live_search_expands_only_when_local_stock_is_insufficient_and_deduplica
     run = client.get(f"/api/runs/{run_id}", headers=headers).json()
     results = cands(client, run_id, headers)
 
-    assert adapter.calls == ["Imphal West", "Imphal East"]
+    assert adapter.calls == ["Imphal West", "Imphal East", "Thoubal", "Bishnupur"]
     assert run["summary"]["search_level"] == "expanded_nearest_districts"
-    assert run["summary"]["areas_checked"] == ["Imphal West", "Imphal East"]
+    assert run["summary"]["areas_checked"] == ["Imphal West", "Imphal East", "Thoubal", "Bishnupur"]
     assert run["result_state"] == "INSUFFICIENT_STOCK"
     assert len(results) == 2
     assert {item["bank"]["bank_id"] for item in results} == {"demo-bank-local", "demo-bank-neighbor"}
     assert all(item["section"] == "C_INSUFFICIENT" for item in results)
     assert "no single facility" in run["summary"]["user_action"].lower()
+
+
+def test_nearby_search_runs_when_local_stock_is_split_but_no_bank_meets_request(make_client):
+    adapter = _live_area_fixture(local_qty=2, neighbor_qty=4, include_second_local=True)
+    client, _ = make_client(stock=adapter, stock_source_mode="live")
+    run_id, headers = start(client, payload(qty=5))
+    run = client.get(f"/api/runs/{run_id}", headers=headers).json()
+    results = cands(client, run_id, headers)
+
+    assert adapter.calls == ["Imphal West", "Imphal East", "Thoubal", "Bishnupur"]
+    assert run["summary"]["search_level"] == "expanded_nearest_districts"
+    assert {item["bank"]["bank_id"] for item in results} == {
+        "demo-bank-local",
+        "demo-bank-local-alt",
+        "demo-bank-neighbor",
+    }
+    assert all(item["quantity_reported"] > 0 for item in results)
 
 
 def test_approval_flow_and_version_invalidation(make_client):

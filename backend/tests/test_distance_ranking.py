@@ -212,8 +212,8 @@ def test_distinct_facilities_with_identical_geocoded_coordinates_do_not_show_sam
 
     assert first.distance_km is None
     assert second.distance_km is None
-    assert "share the same coordinates" in (first.distance_unavailable_reason or "")
-    assert "share the same coordinates" in (second.distance_unavailable_reason or "")
+    assert "share the same source coordinates" in (first.distance_unavailable_reason or "")
+    assert "share the same source coordinates" in (second.distance_unavailable_reason or "")
 
 
 def test_distinct_facilities_with_distinct_coordinates_get_independent_distances():
@@ -225,3 +225,15 @@ def test_distinct_facilities_with_distinct_coordinates_get_independent_distances
     assert first.distance_km is not None
     assert second.distance_km is not None
     assert first.distance_km != second.distance_km
+
+
+def test_shared_coordinates_are_not_used_as_individual_facility_distances():
+    first = candidate("First facility", latitude=24.800001, longitude=93.940001)
+    second = candidate("Second facility", latitude=24.800002, longitude=93.940002)
+
+    add_distance_metadata([first, second], origin=(24.9, 93.95), location_mode="device")
+
+    assert first.distance_km is None
+    assert second.distance_km is None
+    assert "share the same source coordinates" in (first.distance_unavailable_reason or "")
+    assert "share the same source coordinates" in (second.distance_unavailable_reason or "")

@@ -28,11 +28,16 @@ def _install_fake_genai(monkeypatch, models):
         def from_bytes(*, data, mime_type):
             return SimpleNamespace(data=data, mime_type=mime_type)
 
+    class Files:
+        @staticmethod
+        def upload(*, file, config):
+            return SimpleNamespace(file=file, mime_type=config["mime_type"])
+
     types_module.HttpOptions = Options
     types_module.HttpRetryOptions = Options
     types_module.GenerateContentConfig = Options
     types_module.Part = Part
-    client = SimpleNamespace(models=models, close=lambda: None)
+    client = SimpleNamespace(models=models, files=Files(), close=lambda: None)
     genai_module.types = types_module
     genai_module.Client = lambda **kwargs: client
     google_module.genai = genai_module
