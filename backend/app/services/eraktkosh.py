@@ -269,7 +269,18 @@ class ERaktKoshAdapter:
                 updated_banks = []
                 count = 0
                 for bank in banks:
-                    if (bank.bank_id in relevant_ids and bank.latitude is None and
+                    valid_coordinate_pair = (
+                        isinstance(bank.latitude, (int, float))
+                        and not isinstance(bank.latitude, bool)
+                        and isinstance(bank.longitude, (int, float))
+                        and not isinstance(bank.longitude, bool)
+                        and -90 <= bank.latitude <= 90
+                        and -180 <= bank.longitude <= 180
+                    )
+                    needs_geocoding = (
+                        not valid_coordinate_pair or bank.location_precision == "LOCALITY"
+                    )
+                    if (bank.bank_id in relevant_ids and needs_geocoding and
                             count < self._geocoder_candidate_limit and _time.monotonic() < deadline):
                         count += 1
                         try:
@@ -282,9 +293,9 @@ class ERaktKoshAdapter:
                                 bank = bank.model_copy(update={
                                     "latitude": lat, "longitude": lon,
                                     "location_precision": precision,
-                                    "location_note": ("Approximate town/district centre; not the facility location. Distance is approximate, straight-line, not road distance."
+                                     "location_note": ("Approximate OpenStreetMap/Nominatim town/district centre; not the facility location. © OpenStreetMap contributors. Distance is approximate, straight-line, not road distance."
                                                       if precision == "LOCALITY" else
-                                                      "Geocoded facility location; distance is approximate, straight-line, not road distance.")})
+                                                       "Facility match from OpenStreetMap/Nominatim. © OpenStreetMap contributors. Distance is approximate, straight-line, not road distance.")})
                         except Exception as exc:  # geocoding must never fail the stock search
                             log.info("Non-fatal geocoding error: %s", type(exc).__name__)
                     updated_banks.append(bank)
