@@ -60,11 +60,23 @@ def build_container(settings: Settings, *, stock: StockSourceAdapter | None = No
             relay_url=settings.eraktkosh_relay_url,
             relay_secret=settings.eraktkosh_relay_secret.get_secret_value(),
             clock=clock,
-            geocoder=NominatimGeocoder(contact=settings.geocoder_contact,
-                                       base_url=settings.geocoder_base_url,
-                                       application_url=settings.frontend_origin,
-                                       enabled=settings.geocoder_enabled,
-                                       timeout_s=settings.geocoder_timeout_s),
+            redis_client = None
+            if settings.geocoder_redis_url:
+                try:
+                    redis_client = redis.from_url(settings.geocoder_redis_url, decode_responses=True)
+                except Exception as exc:
+                    log.warning("Redis connection failed: %s; geocoding will use in-memory cache only", type(exc).__name__)
+            
+            geocoder=NominatimGeocoder(
+                contact=settings.geocoder_contact,
+                base_url=settings.geocoder_base_url,
+                relay_url=settings.geocoder_relay_url,
+                relay_secret=settings.geocoder_relay_secret.get_secret_value(),
+                application_url=settings.frontend_origin,
+                enabled=settings.geocoder_enabled,
+                timeout_s=settings.geocoder_timeout_s,
+                redis_client=redis_client,
+            ),
             geocoder_candidate_limit=settings.geocoder_candidate_limit,
             geocoder_time_budget_s=settings.geocoder_time_budget_s))
     if directory is None:
