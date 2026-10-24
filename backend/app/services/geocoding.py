@@ -96,6 +96,18 @@ class NominatimGeocoder:
         self._cooldown_until = 0.0
         self._lock = asyncio.Lock()
 
+    @staticmethod
+    def _clean_query(text: str | None) -> str:
+        """Sanitize query text by removing parentheses metadata and excessive punctuation."""
+        if not text:
+            return ""
+        # Remove parentheses contents like "(Non- Govt.)"
+        cleaned = re.sub(r'\([^)]*\)', '', text)
+        # Strip symbols and punctuation except spaces
+        cleaned = re.sub(r'[,.\-_/]+', ' ', cleaned)
+        # Collapse multiple spaces
+        return re.sub(r'\s+', ' ', cleaned).strip()
+
     async def geocode(
         self,
         *,
@@ -181,15 +193,12 @@ class NominatimGeocoder:
         deadline: float,
     ) -> tuple[float, float, str] | None:
         """Query Nominatim: address-first (primary), then name + area fallbacks."""
-        # Address-first queries: full address, then progressively stripped versions
         address_queries = self._address_queries(address, city, district, state)
-        
-        # Name fallback queries: only if address alone doesn't work
         name_queries = self._name_queries(name, city, district, state)
 
         locality_match: tuple[float, float, str] | None = None
 
-        # Try address queries first (most likely to match exactly)
+        # Try address queries first
         for query in address_queries:
             if self._clock() >= deadline:
                 break
@@ -209,7 +218,7 @@ class NominatimGeocoder:
                 ):
                     locality_match = coordinates[0], coordinates[1], "LOCALITY"
 
-        # Fall back to name-based queries only if address didn't find anything
+        # Fall back to name-based queries
         for query in name_queries:
             if self._clock() >= deadline:
                 break
@@ -235,29 +244,31 @@ class NominatimGeocoder:
     def _address_queries(
         address: str | None, city: str | None, district: str | None, state: str | None
     ) -> list[str]:
-        """Build address-first queries: full address, then without hospital name, then just locality/district."""
+        """Build sanitized address-first queries with reliable structural fallbacks."""
         queries: list[str] = []
         seen: set[str] = set()
 
-        # Full address first
-        if address and state:
-            q = f"{address}, {state}"
+        # 1. Fully sanitized raw address + state
+        clean_addr = NominatimGeocoder._clean_query(address)
+        if clean_addr and state:
+            q = f"{clean_addr}, {state}"
             key = q.casefold()
             if key not in seen:
                 queries.append(q)
                 seen.add(key)
 
-        # Address without hospital name prefix (remove everything before first comma)
+        # 2. Address without the hospital facility name prefix
         if address and "," in address and state:
             addr_without_name = ",".join(address.split(",")[1:]).strip()
-            if addr_without_name:
-                q = f"{addr_without_name}, {state}"
+            clean_without_name = NominatimGeocoder._clean_query(addr_without_name)
+            if clean_without_name:
+                q = f"{clean_without_name}, {state}"
                 key = q.casefold()
                 if key not in seen:
                     queries.append(q)
                     seen.add(key)
 
-        # City/district + state
+        # 3. City/district + state
         if city and district and state:
             q = f"{city}, {district}, {state}"
             key = q.casefold()
@@ -265,7 +276,7 @@ class NominatimGeocoder:
                 queries.append(q)
                 seen.add(key)
 
-        # Just district + state
+        # 4. District + state fallback
         if district and state:
             q = f"{district}, {state}"
             key = q.casefold()
@@ -279,29 +290,28 @@ class NominatimGeocoder:
     def _name_queries(
         name: str | None, city: str | None, district: str | None, state: str | None
     ) -> list[str]:
-        """Fallback name-based queries only if address matching failed."""
+        """Build sanitized name-based queries."""
         queries: list[str] = []
         seen: set[str] = set()
 
-        # Hospital name + district + state
-        if name and district and state:
-            q = f"{name}, {district}, {state}"
+        clean_name = NominatimGeocoder._clean_query(name)
+
+        if clean_name and district and state:
+            q = f"{clean_name}, {district}, {state}"
             key = q.casefold()
             if key not in seen:
                 queries.append(q)
                 seen.add(key)
 
-        # Hospital name + city + state
-        if name and city and state:
-            q = f"{name}, {city}, {state}"
+        if clean_name and city and state:
+            q = f"{clean_name}, {city}, {state}"
             key = q.casefold()
             if key not in seen:
                 queries.append(q)
                 seen.add(key)
 
-        # Hospital name + state only
-        if name and state:
-            q = f"{name}, {state}"
+        if clean_name and state:
+            q = f"{clean_name}, {state}"
             key = q.casefold()
             if key not in seen:
                 queries.append(q)
@@ -384,7 +394,7 @@ class NominatimGeocoder:
             self._last_request = self._clock()
             result: list[dict[str, Any]] = []
 
-            # Try relay first (Vercel IP, less likely to be blocked)
+            # Try relay first (Vercel IP)
             if self.relay_url and self.relay_secret:
                 result = await self._lookup_via_relay(query, deadline)
                 if result:
