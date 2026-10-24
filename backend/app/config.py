@@ -84,9 +84,16 @@ class Settings(BaseSettings):
     agent_max_tool_calls: int = Field(8, ge=1, le=50)
     agent_max_workflow_seconds: float = Field(20.0, ge=1, le=120)
 
-    llm_provider: Literal["none", "openai"] = "none"
+    llm_provider: Literal["none", "gemini"] = "none"
     llm_api_key: SecretStr = SecretStr("")
     llm_model: str = ""
+    # Geocoding via Vercel relay (address-first Nominatim queries)
+    geocoder_relay_url: str = ""
+    geocoder_relay_secret: SecretStr = SecretStr("")
+    
+    # Redis connection for geocoding cache (per-facility, 24h TTL)
+    geocoder_redis_url: str = ""
+
 
     @model_validator(mode="after")
     def _production_is_never_demo_by_default(self) -> "Settings":
