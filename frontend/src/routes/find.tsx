@@ -175,55 +175,55 @@ function numericCoordinate(value: unknown): number | null {
 function getFacilityCoordinates(
   candidate: Candidate,
 ): { latitude: number; longitude: number } | null {
+  // Prefer complete coordinate pairs from the same object. A nullish fallback
+  // per field can accidentally combine a stale latitude with a newer longitude,
+  // or stop at an invalid value before reaching the valid nested bank coordinates.
   const nestedLocation = candidate["location"];
   const locationRecord =
     nestedLocation && typeof nestedLocation === "object"
       ? (nestedLocation as Record<string, unknown>)
       : undefined;
   const nestedBank = candidate["bank"];
-  const bankRecord = nestedBank && typeof nestedBank === "object"
-    ? (nestedBank as Record<string, unknown>) : undefined;
+  const bankRecord =
+    nestedBank && typeof nestedBank === "object"
+      ? (nestedBank as Record<string, unknown>)
+      : undefined;
   const coordinates = candidate["coordinates"];
   const coordinateRecord =
     coordinates && typeof coordinates === "object"
       ? (coordinates as Record<string, unknown>)
       : undefined;
 
-  const latitude = numericCoordinate(
-    candidate["latitude"] ??
-      bankRecord?.["latitude"] ??
-      candidate["lat"] ??
-      candidate["location_latitude"] ??
-      locationRecord?.["latitude"] ??
-      locationRecord?.["lat"] ??
-      coordinateRecord?.["latitude"] ??
-      coordinateRecord?.["lat"],
-  );
-  const longitude = numericCoordinate(
-    candidate["longitude"] ??
-      bankRecord?.["longitude"] ??
-      candidate["lng"] ??
-      candidate["lon"] ??
-      candidate["location_longitude"] ??
-      locationRecord?.["longitude"] ??
-      locationRecord?.["lng"] ??
-      locationRecord?.["lon"] ??
-      coordinateRecord?.["longitude"] ??
-      coordinateRecord?.["lng"] ??
-      coordinateRecord?.["lon"],
-  );
+  const pairs: Array<[unknown, unknown]> = [
+    [candidate["latitude"], candidate["longitude"]],
+    [bankRecord?.["latitude"], bankRecord?.["longitude"]],
+    [candidate["lat"], candidate["lng"]],
+    [candidate["lat"], candidate["lon"]],
+    [candidate["location_latitude"], candidate["location_longitude"]],
+    [locationRecord?.["latitude"], locationRecord?.["longitude"]],
+    [locationRecord?.["lat"], locationRecord?.["lng"]],
+    [locationRecord?.["lat"], locationRecord?.["lon"]],
+    [coordinateRecord?.["latitude"], coordinateRecord?.["longitude"]],
+    [coordinateRecord?.["lat"], coordinateRecord?.["lng"]],
+    [coordinateRecord?.["lat"], coordinateRecord?.["lon"]],
+  ];
 
-  if (
-    latitude === null ||
-    longitude === null ||
-    latitude < -90 ||
-    latitude > 90 ||
-    longitude < -180 ||
-    longitude > 180
-  )
-    return null;
+  for (const [rawLatitude, rawLongitude] of pairs) {
+    const latitude = numericCoordinate(rawLatitude);
+    const longitude = numericCoordinate(rawLongitude);
+    if (
+      latitude !== null &&
+      longitude !== null &&
+      latitude >= -90 &&
+      latitude <= 90 &&
+      longitude >= -180 &&
+      longitude <= 180
+    ) {
+      return { latitude, longitude };
+    }
+  }
 
-  return { latitude, longitude };
+  return null;
 }
 
 function candidateLocationPrecision(candidate: Candidate): "FACILITY" | "LOCALITY" | null {
@@ -232,7 +232,15 @@ function candidateLocationPrecision(candidate: Candidate): "FACILITY" | "LOCALIT
     nestedBank && typeof nestedBank === "object"
       ? (nestedBank as Record<string, unknown>)
       : undefined;
-  const precision = candidate["location_precision"] ?? bankRecord?.["location_precision"];
+  const nestedLocation = candidate["location"];
+  const locationRecord =
+    nestedLocation && typeof nestedLocation === "object"
+      ? (nestedLocation as Record<string, unknown>)
+      : undefined;
+  const precision =
+    candidate["location_precision"] ??
+    bankRecord?.["location_precision"] ??
+    locationRecord?.["location_precision"];
   return precision === "FACILITY" || precision === "LOCALITY" ? precision : null;
 }
 
@@ -246,13 +254,19 @@ function candidateDistanceKm(
       candidate["distance_unavailable_reason"].trim() !== "")
   ) return null;
   const reported = candidate["distance_km"];
+  // When a consented origin and current facility coordinates are available,
+  // recalculate from the same coordinates rendered on the map instead of
+  // displaying a potentially stale distance returned by an earlier run.
+  if (origin) {
+    const recalculated = facilityDistanceKm(
+      origin,
+      getFacilityCoordinates(candidate),
+      candidateLocationPrecision(candidate),
+    );
+    if (recalculated !== null) return recalculated;
+  }
   if (typeof reported === "number" && Number.isFinite(reported) && reported >= 0) return reported;
-  if (!origin) return null;
-  return facilityDistanceKm(
-    origin,
-    getFacilityCoordinates(candidate),
-    candidateLocationPrecision(candidate),
-  );
+  return null;
 }
 
 function componentLabel(value: string): string {
@@ -750,12 +764,17 @@ function BloodSearchPage() {
   const mapFacilities = useMemo<FacilityMapItem[]>(() => {
     return shownCandidates.flatMap((candidate, index) => {
       const coordinates = getFacilityCoordinates(candidate);
-      const name = label(candidate["bank_name"] ?? candidate["name"]);
+      const nestedBank = candidate["bank"];
+      const bankRecord =
+        nestedBank && typeof nestedBank === "object"
+          ? (nestedBank as Record<string, unknown>)
+          : undefined;
+      const name = label(candidate["bank_name"] ?? candidate["name"] ?? bankRecord?.["name"]);
       if (!coordinates || !name) return [];
 
-      const id = label(candidate["candidate_id"] ?? candidate["id"]);
-      const address = label(candidate["address"] ?? candidate["formatted_address"]);
-      const locationNote = label(candidate["location_note"]);
+      const id = label(candidate["candidate_id"] ?? candidate["id"] ?? bankRecord?.["bank_id"]);
+      const address = label(candidate["address"] ?? candidate["formatted_address"] ?? bankRecord?.["address"]);
+      const locationNote = label(candidate["location_note"] ?? bankRecord?.["location_note"]);
       return [
         {
           id: id || `facility-${index}`,
