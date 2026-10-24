@@ -1911,9 +1911,15 @@ function BloodSearchPage() {
                             candidate["route_seconds"] >= 0
                               ? candidate["route_seconds"]
                               : null;
+                          // Only use coordinates as a precise directions destination when
+                          // the backend has verified them at facility level. Locality
+                          // coordinates remain useful for an explicitly labelled map pin,
+                          // but must not silently route users to a town/district centre.
                           const facilityDestination = {
                             name,
-                            ...(coordinates ?? {}),
+                            ...(candidateLocationPrecision(candidate) === "FACILITY" && coordinates
+                              ? coordinates
+                              : {}),
                             ...(address ? { address } : {}),
                           };
                           const directionsUrl = syntheticFacility
@@ -2150,8 +2156,16 @@ function BloodSearchPage() {
                       const sourceUpdate = label(candidate["source_updated_at"] ?? stock["source_updated_at"] ?? candidate["source_updated_at_raw"] ?? stock["source_updated_at_raw"]);
                       const retrieved = label(candidate["retrieved_at"] ?? candidate["retrieval_time"]);
                       const coordinates = getFacilityCoordinates(candidate);
+                      // Never treat locality-centre coordinates as the hospital's exact
+                      // destination. Let the map provider search by facility name/address.
                       const directionsUrl = syntheticFacility ? null : buildDirectionsUrl(
-                        { name, ...(coordinates ?? {}), ...(address ? { address } : {}) },
+                        {
+                          name,
+                          ...(candidateLocationPrecision(candidate) === "FACILITY" && coordinates
+                            ? coordinates
+                            : {}),
+                          ...(address ? { address } : {}),
+                        },
                         travelMode,
                         lastPayload?.location.mode === "device"
                           ? `${lastPayload.location.latitude},${lastPayload.location.longitude}`
