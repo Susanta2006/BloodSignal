@@ -298,9 +298,11 @@ function candidateDistanceKm(
 
 /** Straight-line distance is always approximate; locality-level pins get a "~" prefix. */
 function formatDistance(km: number, candidate: Candidate): string {
-  const approximate = candidateLocationPrecision(candidate) === "LOCALITY";
-  return `${approximate ? "~" : ""}${km.toFixed(2)} km`;
+  const precision = candidateLocationPrecision(candidate);
+  const isApprox = precision === "LOCALITY";
+  return `${isApprox ? "~" : ""}${km.toFixed(2)} km${isApprox ? " (approx.)" : ""}`;
 }
+
 
 /** Contact values for display. Hides obvious placeholder fax numbers (e.g. 1234567890). */
 function contactValues(candidate: Candidate, key: "emails" | "faxes", single: string): string[] {
@@ -1076,7 +1078,7 @@ function BloodSearchPage() {
     // Prefer the browser's network-assisted location first. This works better on
     // laptops and desktops that do not have a GPS receiver; use high accuracy only
     // as a fallback when the browser cannot provide an approximate position.
-    if (browserAvailable) requestPosition(false, 18000, 120000);
+    if (browserAvailable) requestPosition(true, 18000, 120000);
 
     if (nativeAvailable) {
       void getNativeLocation().then((coordinates) => {
