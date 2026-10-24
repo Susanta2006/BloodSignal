@@ -1,14 +1,9 @@
-"""Rate-limited Nominatim fallback geocoding for e-RaktKosh facilities.
+"""Address-first Nominatim geocoding for e-RaktKosh facilities with relay fallback + Redis caching."""
 
-Facility coordinates are accepted only when the result's name, feature type, district,
-and state agree with the requested hospital. Locality results remain explicitly marked
-LOCALITY; they are used for an approximate straight-line distance and are always labelled
-as approximate. Resolved facilities are cached so repeat searches do not re-geocode.
-OpenStreetMap/Nominatim (free, no API key) is the sole geocoding provider.
-"""
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import re
@@ -29,12 +24,6 @@ _LOCALITY_ADDRESS_FIELDS = (
     "district", "county", "city_district", "city", "municipality", "town",
     "village", "suburb", "state_district",
 )
-_GENERIC_NAME_TOKENS = {
-    "and", "the", "of", "at", "for", "in", "a", "an", "dept", "department",
-    "hospital", "hospitals", "clinic", "clinics", "blood", "bank", "centre",
-    "center", "medical", "health", "services", "service", "transfusion",
-    "medicine", "unit", "government", "govt",
-}
 
 
 def _tokens(value: str) -> set[str]:
@@ -54,7 +43,7 @@ def _matches_area(expected: str | None, actual_values: list[object]) -> bool:
 
 
 def area_hints(address: str | None, state: str | None) -> dict[str, str | None]:
-    """Extract city and district from an e-RaktKosh address that ends in ``..., area, district, state``.
+    """Extract city and district from an e-RaktKosh address ending in `..., area, district, state`.
 
     e-RaktKosh format: HOSPITAL_NAME, locality/area, DISTRICT, STATE
     Only trusted when the final part matches the requested state. Returns the two parts
@@ -73,68 +62,135 @@ def area_hints(address: str | None, state: str | None) -> dict[str, str | None]:
 
 
 class NominatimGeocoder:
-    def __init__(self, *, contact: str = "", base_url: str = "https://nominatim.openstreetmap.org/search",
-                 application_url: str = "https://bloodsignal.vercel.app", enabled: bool = False,
-                 timeout_s: float = 2.0, max_cache_entries: int = 1000,
-                 cooldown_s: float = 900.0, clock=time.monotonic,
-                 sleep=asyncio.sleep, transport: httpx.AsyncBaseTransport | None = None):
+    def __init__(
+        self,
+        *,
+        contact: str = "",
+        base_url: str = "https://nominatim.openstreetmap.org/search",
+        relay_url: str = "",
+        relay_secret: str = "",
+        application_url: str = "https://bloodsignal.vercel.app",
+        enabled: bool = False,
+        timeout_s: float = 2.0,
+        max_cache_entries: int = 1000,
+        cooldown_s: float = 900.0,
+        redis_client: Any = None,
+        clock=time.monotonic,
+        sleep=asyncio.sleep,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
         self.enabled = enabled
-        self._resolved: OrderedDict[str, tuple[float, float, str]] = OrderedDict()
         self.contact = contact.strip()
         self.base_url = base_url.rstrip("?")
+        self.relay_url = relay_url.rstrip("/") if relay_url else ""
+        self.relay_secret = relay_secret.strip()
         self.application_url = application_url.strip().rstrip("/") or "https://bloodsignal.vercel.app"
         self.timeout_s = timeout_s
         self.max_cache_entries = max_cache_entries
         self.cooldown_s = cooldown_s
+        self.redis_client = redis_client
+        self._memory_cache: OrderedDict[str, tuple[float, float, str]] = OrderedDict()
+        self._lookup_cache: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
         self._clock, self._sleep, self._transport = clock, sleep, transport
         self._last_request = 0.0
         self._cooldown_until = 0.0
         self._lock = asyncio.Lock()
-        self._cache: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
 
-    async def geocode(self, *, name: str, address: str | None, city: str | None,
-                      district: str | None, state: str | None, budget_s: float = 3.0
-                      ) -> tuple[float, float, str] | None:
+    async def geocode(
+        self,
+        *,
+        name: str,
+        address: str | None,
+        city: str | None,
+        district: str | None,
+        state: str | None,
+        budget_s: float = 3.0,
+    ) -> tuple[float, float, str] | None:
         """Resolve facility coordinates once; later searches reuse the cached result.
-        Uses OpenStreetMap/Nominatim (free, no API key required).
+        Uses OpenStreetMap/Nominatim via Vercel relay (first) and direct OSM (fallback).
+        Redis caches results across server restarts; in-memory cache for this session.
         """
         if not self.enabled:
             return None
-        key = "|".join((name or "", address or "", state or "")).casefold()
-        if key in self._resolved:
-            self._resolved.move_to_end(key)
-            return self._resolved[key]
+
+        # Cache key: address + state (name alone is too variable)
+        cache_key = f"geo:{address or ''}|{state or ''}".casefold()
+        
+        # Check in-memory cache first
+        if cache_key in self._memory_cache:
+            self._memory_cache.move_to_end(cache_key)
+            return self._memory_cache[cache_key]
+        
+        # Check Redis cache if available
+        if self.redis_client:
+            try:
+                cached = await asyncio.to_thread(self.redis_client.get, cache_key)
+                if cached:
+                    try:
+                        lat, lon, prec = json.loads(cached)
+                        result = (lat, lon, prec)
+                        self._memory_cache[cache_key] = result
+                        while len(self._memory_cache) > self.max_cache_entries:
+                            self._memory_cache.popitem(last=False)
+                        return result
+                    except (json.JSONDecodeError, ValueError, TypeError):
+                        pass
+            except Exception as exc:
+                log.debug("Redis cache lookup failed: %s", type(exc).__name__)
+
         hints = area_hints(address, state)
         city = city or hints["city"]
         district = district or hints["district"]
         deadline = self._clock() + max(0.0, budget_s)
-        found = await self._geocode_osm(name=name, address=address, city=city,
-                                        district=district, state=state, deadline=deadline)
+        found = await self._geocode_osm(
+            name=name,
+            address=address,
+            city=city,
+            district=district,
+            state=state,
+            deadline=deadline,
+        )
+
         if found is not None:
-            self._resolved[key] = found
-            while len(self._resolved) > self.max_cache_entries:
-                self._resolved.popitem(last=False)
+            # Store in both caches
+            self._memory_cache[cache_key] = found
+            while len(self._memory_cache) > self.max_cache_entries:
+                self._memory_cache.popitem(last=False)
+            
+            if self.redis_client:
+                try:
+                    await asyncio.to_thread(
+                        self.redis_client.setex,
+                        cache_key,
+                        86400,  # 24-hour TTL
+                        json.dumps(found),
+                    )
+                except Exception as exc:
+                    log.debug("Redis cache store failed: %s", type(exc).__name__)
+
         return found
 
-    async def _geocode_osm(self, *, name: str, address: str | None, city: str | None,
-                           district: str | None, state: str | None, deadline: float
-                           ) -> tuple[float, float, str] | None:
-        facility_queries = self._queries(
-            (name, address, city, district, state, "India"),
-            (name, district, state, "India"),
-            (name, city, state, "India"),
-            (name, address, "India"),  # Just the hospital + full address, skip areas
-            (address, "India"),  # Address alone as a fallback
-        )
-        locality_queries = self._queries(
-            (city, district, state, "India"),
-            (district, state, "India"),
-        )
+    async def _geocode_osm(
+        self,
+        *,
+        name: str,
+        address: str | None,
+        city: str | None,
+        district: str | None,
+        state: str | None,
+        deadline: float,
+    ) -> tuple[float, float, str] | None:
+        """Query Nominatim: address-first (primary), then name + area fallbacks."""
+        # Address-first queries: full address, then progressively stripped versions
+        address_queries = self._address_queries(address, city, district, state)
+        
+        # Name fallback queries: only if address alone doesn't work
+        name_queries = self._name_queries(name, city, district, state)
+
         locality_match: tuple[float, float, str] | None = None
 
-        # Keep looking after a city result. A low-precision first hit must not prevent
-        # the more specific name + district + state query from finding the hospital.
-        for query in facility_queries:
+        # Try address queries first (most likely to match exactly)
+        for query in address_queries:
             if self._clock() >= deadline:
                 break
             for result in await self._lookup(query, deadline):
@@ -143,7 +199,6 @@ class NominatimGeocoder:
                     continue
                 if (
                     self._is_facility(result)
-                    and self._matches_facility_name(result, name)
                     and self._matches_region(result, district, state)
                 ):
                     return coordinates[0], coordinates[1], "FACILITY"
@@ -154,32 +209,104 @@ class NominatimGeocoder:
                 ):
                     locality_match = coordinates[0], coordinates[1], "LOCALITY"
 
-        # Only return a locality after all facility-focused searches have been tried.
-        for query in locality_queries:
+        # Fall back to name-based queries only if address didn't find anything
+        for query in name_queries:
             if self._clock() >= deadline:
                 break
             for result in await self._lookup(query, deadline):
                 coordinates = self._coordinates(result)
+                if coordinates is None:
+                    continue
                 if (
-                    coordinates is not None
+                    self._is_facility(result)
+                    and self._matches_region(result, district, state)
+                ):
+                    return coordinates[0], coordinates[1], "FACILITY"
+                if (
+                    locality_match is None
                     and self._is_locality(result)
                     and self._matches_region(result, district, state)
                 ):
-                    return coordinates[0], coordinates[1], "LOCALITY"
+                    locality_match = coordinates[0], coordinates[1], "LOCALITY"
+
         return locality_match
 
     @staticmethod
-    def _queries(*parts_list: tuple[str | None, ...]) -> list[str]:
+    def _address_queries(
+        address: str | None, city: str | None, district: str | None, state: str | None
+    ) -> list[str]:
+        """Build address-first queries: full address, then without hospital name, then just locality/district."""
         queries: list[str] = []
         seen: set[str] = set()
-        for parts in parts_list:
-            query = ", ".join(dict.fromkeys(
-                part.strip() for part in parts if isinstance(part, str) and part.strip()
-            ))
-            key = query.casefold()
-            if query and key not in seen:
+
+        # Full address first
+        if address and state:
+            q = f"{address}, {state}"
+            key = q.casefold()
+            if key not in seen:
+                queries.append(q)
                 seen.add(key)
-                queries.append(query)
+
+        # Address without hospital name prefix (remove everything before first comma)
+        if address and "," in address and state:
+            addr_without_name = ",".join(address.split(",")[1:]).strip()
+            if addr_without_name:
+                q = f"{addr_without_name}, {state}"
+                key = q.casefold()
+                if key not in seen:
+                    queries.append(q)
+                    seen.add(key)
+
+        # City/district + state
+        if city and district and state:
+            q = f"{city}, {district}, {state}"
+            key = q.casefold()
+            if key not in seen:
+                queries.append(q)
+                seen.add(key)
+
+        # Just district + state
+        if district and state:
+            q = f"{district}, {state}"
+            key = q.casefold()
+            if key not in seen:
+                queries.append(q)
+                seen.add(key)
+
+        return queries
+
+    @staticmethod
+    def _name_queries(
+        name: str | None, city: str | None, district: str | None, state: str | None
+    ) -> list[str]:
+        """Fallback name-based queries only if address matching failed."""
+        queries: list[str] = []
+        seen: set[str] = set()
+
+        # Hospital name + district + state
+        if name and district and state:
+            q = f"{name}, {district}, {state}"
+            key = q.casefold()
+            if key not in seen:
+                queries.append(q)
+                seen.add(key)
+
+        # Hospital name + city + state
+        if name and city and state:
+            q = f"{name}, {city}, {state}"
+            key = q.casefold()
+            if key not in seen:
+                queries.append(q)
+                seen.add(key)
+
+        # Hospital name + state only
+        if name and state:
+            q = f"{name}, {state}"
+            key = q.casefold()
+            if key not in seen:
+                queries.append(q)
+                seen.add(key)
+
         return queries
 
     @staticmethod
@@ -230,79 +357,132 @@ class NominatimGeocoder:
             return False
         return True
 
-    @staticmethod
-    def _matches_facility_name(result: dict[str, Any], requested_name: str) -> bool:
-        requested = _tokens(requested_name) - _GENERIC_NAME_TOKENS
-        if not requested:
-            return False
-        returned_names: list[str] = []
-        if isinstance(result.get("name"), str):
-            returned_names.append(result["name"])
-        namedetails = result.get("namedetails")
-        if isinstance(namedetails, dict):
-            returned_names.extend(value for value in namedetails.values() if isinstance(value, str))
-        display_name = result.get("display_name")
-        if isinstance(display_name, str):
-            returned_names.append(display_name.split(",", 1)[0])
-        returned: set[str] = set()
-        for value in returned_names:
-            returned.update(_tokens(value))
-        matched = requested & returned
-        # For Indian hospitals: two distinctive words, or one 4+ char token, or abbreviations like AGMC, IGM.
-        # Abbreviations are uppercase runs of 2–5 letters, often present in official hospital names.
-        if len(matched) >= 2 or any(len(token) >= 4 for token in matched):
-            return True
-        # Check for acronyms/abbreviations (2–5 uppercase letters as a single word).
-        for acronym in requested:
-            if 2 <= len(acronym) <= 5 and acronym.isupper() and acronym in returned:
-                return True
-        return False
+    async def _lookup(
+        self, query: str, deadline: float
+    ) -> list[dict[str, Any]]:
+        """Query Nominatim via relay (if configured) or direct OSM endpoint."""
+        if query in self._lookup_cache:
+            self._lookup_cache.move_to_end(query)
+            return self._lookup_cache[query]
 
-    async def _lookup(self, query: str, deadline: float) -> list[dict[str, Any]]:
-        if query in self._cache:
-            self._cache.move_to_end(query)
-            return self._cache[query]
         async with self._lock:
-            if query in self._cache:
-                self._cache.move_to_end(query)
-                return self._cache[query]
+            if query in self._lookup_cache:
+                self._lookup_cache.move_to_end(query)
+                return self._lookup_cache[query]
+
             now = self._clock()
             if now < self._cooldown_until or now >= deadline:
                 return []
+
             wait = max(0.0, 1.0 - (now - self._last_request))
             if now + wait + 0.05 >= deadline:
                 return []
+
             if wait:
                 await self._sleep(wait)
+
             self._last_request = self._clock()
-            try:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(min(self.timeout_s, max(0.2, deadline-self._clock()))),
-                                             transport=self._transport, follow_redirects=False) as client:
-                    params: dict[str, str | int] = {
-                        "q": query, "format": "jsonv2", "limit": 5,
-                        "addressdetails": 1, "namedetails": 1, "countrycodes": "in",
-                    }
-                    if self.contact:
-                        params["email"] = self.contact
-                    response = await client.get(self.base_url, params=params,
-                                                headers={"Accept": "application/json",
-                                                         "User-Agent": (
-                                                             f"BloodSignal/1.0 ({self.application_url}"
-                                                             f"{'; contact: ' + self.contact if self.contact else ''})"
-                                                         )})
-                if response.status_code in (403, 429):
-                    self._cooldown_until = self._clock() + self.cooldown_s
-                    log.warning("Nominatim returned HTTP %s; geocoding cooling down", response.status_code)
-                    result = []
-                elif response.status_code >= 400:
-                    result = []
-                else:
-                    payload = response.json()
-                    result = [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
-            except (httpx.HTTPError, ValueError, TypeError) as exc:
-                log.info("Geocoding lookup failed non-fatally: %s", type(exc).__name__)
-                result = []
-            self._cache[query] = result
-            while len(self._cache) > self.max_cache_entries:
-                self._cache.popitem(last=False)
+            result: list[dict[str, Any]] = []
+
+            # Try relay first (Vercel IP, less likely to be blocked)
+            if self.relay_url and self.relay_secret:
+                result = await self._lookup_via_relay(query, deadline)
+                if result:
+                    self._lookup_cache[query] = result
+                    while len(self._lookup_cache) > self.max_cache_entries:
+                        self._lookup_cache.popitem(last=False)
+                    return result
+
+            # Fall back to direct OSM
+            result = await self._lookup_direct(query, deadline)
+            self._lookup_cache[query] = result
+            while len(self._lookup_cache) > self.max_cache_entries:
+                self._lookup_cache.popitem(last=False)
             return result
+
+    async def _lookup_via_relay(
+        self, query: str, deadline: float
+    ) -> list[dict[str, Any]]:
+        """Query Nominatim through Vercel relay."""
+        try:
+            remaining = max(0.0, deadline - self._clock())
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(min(self.timeout_s, remaining)),
+                transport=self._transport,
+                follow_redirects=False,
+            ) as client:
+                params: dict[str, str | int] = {
+                    "q": query,
+                    "format": "jsonv2",
+                    "limit": 5,
+                    "addressdetails": 1,
+                    "namedetails": 1,
+                    "countrycodes": "in",
+                }
+                if self.contact:
+                    params["email"] = self.contact
+                response = await client.get(
+                    self.relay_url,
+                    params=params,
+                    headers={
+                        "Accept": "application/json",
+                        "X-Relay-Secret": self.relay_secret,
+                        "User-Agent": f"BloodSignal/1.0 ({self.application_url})",
+                    },
+                )
+            if response.status_code in (403, 429):
+                log.warning("Relay returned HTTP %s; geocoding relay failing over to direct", response.status_code)
+                return []
+            elif response.status_code >= 400:
+                return []
+            else:
+                payload = response.json()
+                return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            log.debug("Relay geocoding lookup failed: %s", type(exc).__name__)
+            return []
+
+    async def _lookup_direct(
+        self, query: str, deadline: float
+    ) -> list[dict[str, Any]]:
+        """Query Nominatim directly from OSM."""
+        try:
+            remaining = max(0.0, deadline - self._clock())
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(min(self.timeout_s, remaining)),
+                transport=self._transport,
+                follow_redirects=False,
+            ) as client:
+                params: dict[str, str | int] = {
+                    "q": query,
+                    "format": "jsonv2",
+                    "limit": 5,
+                    "addressdetails": 1,
+                    "namedetails": 1,
+                    "countrycodes": "in",
+                }
+                if self.contact:
+                    params["email"] = self.contact
+                response = await client.get(
+                    self.base_url,
+                    params=params,
+                    headers={
+                        "Accept": "application/json",
+                        "User-Agent": (
+                            f"BloodSignal/1.0 ({self.application_url}"
+                            f"{'; contact: ' + self.contact if self.contact else ''})"
+                        ),
+                    },
+                )
+            if response.status_code in (403, 429):
+                self._cooldown_until = self._clock() + self.cooldown_s
+                log.warning("Nominatim returned HTTP %s; geocoding cooling down", response.status_code)
+                return []
+            elif response.status_code >= 400:
+                return []
+            else:
+                payload = response.json()
+                return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            log.info("Geocoding lookup failed: %s", type(exc).__name__)
+            return []
