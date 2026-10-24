@@ -46,17 +46,26 @@ def add_distance_metadata(
     origin: tuple[float, float] | None,
     location_mode: str,
 ) -> None:
+    """
+    FIXED: Add distance metadata with proper coordinate validation.
+    Distinguishes between missing user coordinates vs missing facility coordinates.
+    """
+    import logging
+    log = logging.getLogger("geocoding")
+    
     candidate_list = list(candidates)
 
     for candidate in candidate_list:
         bank = candidate.bank
-        destination = (
-            (bank.latitude, bank.longitude)
-            if valid_coordinate_pair(bank.latitude, bank.longitude)
-            else None
-        )
-        # Facility coordinates (source or geocoded) and locality-level geocodes both give a
-        # straight-line distance. Locality results are flagged approximate, never exact.
+        
+        # Validate origin coordinates
+        origin_valid = origin is not None and valid_coordinate_pair(*origin)
+        
+        # Validate facility coordinates  
+        destination_valid = valid_coordinate_pair(bank.latitude, bank.longitude)
+        destination = (bank.latitude, bank.longitude) if destination_valid else None
+        
+        # Calculate distance with validated coordinates
         distance = haversine_distance_km(origin, destination)
         unavailable_reason = None
 
@@ -70,17 +79,42 @@ def add_distance_metadata(
             candidate.distance_km = None
             candidate.distance_type = None
             candidate.distance_is_approximate = False
-            if unavailable_reason is not None:
-                reason = unavailable_reason
-            elif origin is None or not valid_coordinate_pair(*origin):
+            
+            # Determine specific reason
+            if not origin_valid:
+                # User location problem
+                if origin is None:
+                    reason = (
+                        "Exact distance is unavailable because device coordinates were not shared."
+                        if location_mode == "exact"
+                        else "Exact distance is unavailable because the search uses a district or manual location."
+                    )
+                else:
+                    reason = (
+                        f"Exact distance is unavailable: invalid user coordinates "
+                        f"(lat={origin[0]}, lon={origin[1]})."
+                    )
+            elif not destination_valid:
+                # Facility location problem
                 reason = (
-                    "Exact distance is unavailable because the search uses a district or manual location."
-                    if location_mode == "manual"
-                    else "Exact distance is unavailable because device coordinates were not shared."
+                    f"Exact distance is unavailable: this facility has no valid coordinates "
+                    f"(lat={bank.latitude}, lon={bank.longitude}). "
+                    f"Facility may need re-geocoding."
+                )
+                log.warning(
+                    f"Invalid facility coordinates for {bank.name}: "
+                    f"lat={bank.latitude}, lon={bank.longitude}"
                 )
             else:
-                reason = "Exact distance is unavailable because this facility has no valid coordinates."
+                # Should not happen
+                reason = "Exact distance is unavailable for unknown reasons."
+                log.error(
+                    f"Unexpected distance calculation failure for {bank.name}: "
+                    f"origin={origin}, destination={destination}"
+                )
+            
             candidate.distance_unavailable_reason = reason
+
 
 
 def _tier(candidate: Candidate) -> tuple[int, str]:
