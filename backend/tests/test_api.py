@@ -18,7 +18,8 @@ def test_tc1_demo_scenario_end_to_end(make_client):
     assert run["demo_label"] == "Simulated demo data — not verified hospital inventory."
     by = {c["bank"]["name"]: c for c in cands(client, run_id, h)}
     a = by["JNIMS Hospital Blood Bank"]
-    assert a["section"] == "A_ELIGIBLE" and not a["verified_for_search"] and a["rank"] == 1
+    assert a["section"] == "A_ELIGIBLE" and not a["verified_for_search"] and a["rank"] == 2
+    assert by["Shija Blood Bank and Transfusion Services"]["rank"] == 1
     assert a["source_type"] == "demo"
     assert a["ranking_tier"] == 4
     assert a["distance_type"] == "straight_line" and a["distance_km"] is not None
@@ -49,6 +50,25 @@ def test_tc4_no_match_offers_nearby_without_false_hope(make_client):
     assert "Imphal West" in run["summary"]["suggested_districts"]
     assert "no claim" in run["summary"]["expansion_note"]
     assert run["summary"]["areas_checked"] == ["Thoubal"]
+    assert "stock there has not been confirmed" in run["summary"]["user_action"]
+
+
+def test_zero_quantity_is_not_reported_as_partial_availability(make_client):
+    adapter = StaticAdapter([rec("alpha", qty=0)])
+    adapter.source_type = "live"
+    client, _ = make_client(stock=adapter)
+    run_id, headers = start(client, payload())
+    run = client.get(f"/api/runs/{run_id}", headers=headers).json()
+    results = cands(client, run_id, headers)
+
+    assert run["result_state"] == "NO_MATCH_FOUND"
+    assert "no matching stock record" in run["summary"]["user_action"].lower()
+    zero_records = [candidate for candidate in results if candidate["quantity_reported"] == 0]
+    assert zero_records
+    assert not any(
+        candidate["quantity_reported"] is not None and candidate["quantity_reported"] > 0
+        for candidate in results
+    )
 
 
 # ---------------------------------------------------------- ranking

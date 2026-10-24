@@ -17,7 +17,9 @@ def test_tc1_o_negative_district_ranking_contacts_and_original_timestamps(make_c
 
     assert run["demo_label"] == "Simulated demo data — not verified hospital inventory."
     assert alpha["section"] == "A_ELIGIBLE"
-    assert alpha["rank"] == 1
+    assert alpha["rank"] == 2
+    gamma = next(c for c in results if c["bank"]["name"] == "Shija Blood Bank and Transfusion Services")
+    assert gamma["rank"] == 1
     assert alpha["source_updated_at"] == "2026-10-19T06:00:00Z"
     assert alpha["retrieved_at"] == "2026-10-19T10:00:00Z"
     # Contact keys must be exposed, but synthetic records intentionally have no dialable phone.

@@ -571,8 +571,20 @@ class Orchestrator:
 
         has_a = any(c.section == Section.A_ELIGIBLE and c.source_type == "live" for c in cands)
         has_b = any(c.section == Section.B_UNCERTAIN and c.source_type == "live" for c in cands)
-        has_insufficient = any(c.section == Section.C_INSUFFICIENT and c.source_type == "live" for c in cands)
-        has_demo = any(c.source_type == "demo" for c in cands)
+        has_insufficient = any(
+            c.section == Section.C_INSUFFICIENT
+            and c.source_type == "live"
+            and c.quantity_reported is not None
+            and c.quantity_reported > 0
+            for c in cands
+        )
+        has_demo = any(
+            c.source_type == "demo"
+            and c.quantity_reported is not None
+            and c.quantity_reported > 0
+            and c.match_state in (MatchState.MATCHED_REPORTED, MatchState.INSUFFICIENT)
+            for c in cands
+        )
         if source_failed:
             result_state, status = "SOURCE_UNAVAILABLE", RunStatus.NEEDS_REVIEW
             action = ("The source denied access, so no stock data was retrieved. This is not evidence of "
@@ -614,6 +626,17 @@ class Orchestrator:
             area for area in (nearby_districts(req.district) if req.include_nearby_districts else [])
             if area.strip().casefold() not in checked_keys
         ])
+        if result_state == "NO_MATCH_FOUND":
+            if suggested:
+                action = (
+                    "No matching stock record was found in the sources checked. Nearby districts "
+                    "listed here are suggestions only; stock there has not been confirmed."
+                )
+            else:
+                action = (
+                    "No matching stock record was returned from the sources checked. This does not "
+                    "prove blood is unavailable; call facilities or the treating hospital directly."
+                )
         expansion_warnings = run.plan.get("expansion_warnings", [])
         if search_level == "expanded_nearest_districts":
             expansion_note = (f"Checked configured nearby districts ({GEO_POLICY_VERSION}); the geographic map is unverified. "

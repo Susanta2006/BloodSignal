@@ -3,7 +3,7 @@ from datetime import timedelta
 from app.schemas import (BloodGroup, Component, EvidenceRecord, EvidenceState, MatchState,
                          QuantityUnit, Section, StoredRequest)
 from app.safety import verify_eligible
-from app.services.matching import decide, match_bank
+from app.services.matching import decide, display_note, match_bank
 from tests.conftest import NOW, rec
 
 
@@ -34,6 +34,17 @@ def test_tc2_three_day_old_is_stale_not_eligible():
     d = dec([ev(age_h=72)])
     assert d.evidence_state == EvidenceState.STALE and d.section == Section.B_UNCERTAIN
     assert "STALE_SOURCE" in d.reason_codes
+
+
+def test_stale_sufficient_exact_stock_is_retained_with_its_source_timestamp():
+    record = ev(age_h=72, qty=3)
+    d = dec([record], qty=2)
+
+    assert d.match_state == MatchState.MATCHED_REPORTED
+    assert d.section == Section.B_UNCERTAIN
+    assert d.evidence_state == EvidenceState.STALE
+    assert d.selected is not None and d.selected.quantity == 3
+    assert "Last source update: 3 days ago" in display_note(d, req(qty=2), NOW)
 
 
 def test_freshness_boundary():

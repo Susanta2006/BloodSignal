@@ -8,7 +8,7 @@ from typing import Iterable
 from app.schemas import Candidate, EvidenceState, MatchState, Section
 
 EARTH_RADIUS_KM = 6371.0088
-RANKING_VERSION = "availability-freshness-nearest-first-2.1.0"
+RANKING_VERSION = "freshness-availability-distance-2.2.0"
 
 
 def valid_coordinate_pair(latitude: object, longitude: object) -> bool:
@@ -159,6 +159,46 @@ def _quantity_score(candidate: Candidate, requested_quantity: int) -> float:
     return min(quantity / requested_quantity, 1.0)
 
 
+def _is_positive_exact_match(candidate: Candidate) -> bool:
+    quantity = candidate.quantity_reported
+    return (
+        candidate.match_state in (MatchState.MATCHED_REPORTED, MatchState.INSUFFICIENT)
+        and quantity is not None
+        and quantity > 0
+    )
+
+
+def _freshness_order(candidate: Candidate, now: datetime, freshness_hours: int) -> tuple[int, float]:
+    """Fresh reports first, newest source timestamp first, then stale and untimed evidence."""
+    state = getattr(candidate.evidence_state, "value", candidate.evidence_state)
+    updated = candidate.source_updated_at
+    if updated is None or state in (
+        EvidenceState.UNKNOWN_FRESHNESS.value,
+        EvidenceState.CONFLICTING_REPORTS.value,
+        EvidenceState.SOURCE_UNAVAILABLE.value,
+    ):
+        return 2, math.inf
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    age_hours = (now - updated).total_seconds() / 3600
+    if age_hours < 0:
+        return 2, math.inf
+    freshness_bucket = 0 if age_hours <= freshness_hours else 1
+    return freshness_bucket, -updated.timestamp()
+
+
+def _availability_order(candidate: Candidate, requested_quantity: int) -> tuple[int, float]:
+    """Positive exact-scope stock: surplus, exact quantity, partial quantity, then unknown."""
+    quantity = candidate.quantity_reported
+    if not _is_positive_exact_match(candidate) or quantity is None:
+        return 3, 0.0
+    if quantity > requested_quantity:
+        return 0, -quantity
+    if quantity == requested_quantity:
+        return 1, -quantity
+    return 2, -quantity
+
+
 def rank_candidates(
     candidates: list[Candidate],
     *,
@@ -170,11 +210,12 @@ def rank_candidates(
     quantity_weight: float,
     distance_weight: float,
 ) -> None:
-    """Rank by evidence/availability, then freshness and nearest validated distance.
+    """Rank exact positive live stock by freshness, quantity class, then proximity.
 
-    The normalized score remains available as supporting metadata. Ordering is explicit:
-    evidence tier, freshness, largest partial quantity when applicable, then nearest
-    validated straight-line distance. Missing distances sort after known distances.
+    Source/evidence quality remains fail-closed: exact-scope positive live reports precede
+    unconfirmed live records, and synthetic demo records remain last. Within those groups,
+    freshness is ordered before availability (surplus, exact, partial), then validated
+    straight-line distance. The normalized score is supporting metadata, not the sort key.
     """
     total_weight = freshness_weight + quantity_weight + distance_weight
     if total_weight <= 0:
@@ -186,6 +227,13 @@ def rank_candidates(
         tier, tier_reason = _tier(candidate)
         fresh = _freshness_score(candidate, now, freshness_hours)
         quantity = _quantity_score(candidate, requested_quantity)
+        source_tier = (
+            2 if candidate.source_type == "demo"
+            else 0 if _is_positive_exact_match(candidate)
+            else 1
+        )
+        freshness_bucket, timestamp_key = _freshness_order(candidate, now, freshness_hours)
+        availability_bucket, quantity_key = _availability_order(candidate, requested_quantity)
         distance = (
             1.0 / (1.0 + candidate.distance_km / distance_scale_km)
             if candidate.distance_km is not None
@@ -201,23 +249,13 @@ def rank_candidates(
             else "distance was unavailable and did not affect the score"
         )
         candidate.ranking_explanation = (
-            f"Tier {tier}. {tier_reason} Within this tier, ranking prioritizes source freshness, "
-            f"then proximity; {distance_reason}. Partial positive-stock records use reported quantity "
-            "before proximity. The weighted evidence score is also included for reference."
-        )
-        partial_quantity = (
-            -candidate.quantity_reported
-            if (
-                candidate.section == Section.C_INSUFFICIENT
-                and candidate.match_state == MatchState.INSUFFICIENT
-                and candidate.quantity_reported is not None
-            )
-            else 0.0
+            f"Tier {tier}. {tier_reason} Exact positive live reports are ordered by source freshness, "
+            "then surplus stock, exact requested quantity, partial stock, and proximity; "
+            f"{distance_reason}. The weighted evidence score is also included for reference."
         )
         prepared.append((
-            (tier, -fresh, partial_quantity,
+            (source_tier, freshness_bucket, timestamp_key, availability_bucket, quantity_key,
              candidate.distance_km if candidate.distance_km is not None else math.inf,
-             -quantity,
              candidate.bank.name.casefold(), candidate.bank.bank_id),
             candidate,
         ))

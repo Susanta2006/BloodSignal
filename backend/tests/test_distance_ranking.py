@@ -66,8 +66,11 @@ def rank(items, *, origin=(24.80, 93.94), location_mode="device", now=None, **ov
 
 
 def test_evidence_tiers_precede_distance_and_fresh_sufficient_uses_distance_as_tiebreaker():
+    now = utcnow()
     nearby = candidate("Nearby confirmed", latitude=24.801, longitude=93.941)
     distant = candidate("Distant confirmed", latitude=25.8, longitude=93.94)
+    nearby.source_updated_at = now - timedelta(hours=2)
+    distant.source_updated_at = now - timedelta(hours=2)
     nearby_unknown = candidate(
         "Nearby unknown",
         section=Section.E_UNKNOWN,
@@ -79,7 +82,7 @@ def test_evidence_tiers_precede_distance_and_fresh_sufficient_uses_distance_as_t
         longitude=93.9401,
     )
 
-    ranked = rank([distant, nearby_unknown, nearby])
+    ranked = rank([distant, nearby_unknown, nearby], now=now)
 
     assert [item.bank.name for item in ranked[:2]] == ["Nearby confirmed", "Distant confirmed"]
     assert ranked[2].bank.name == "Nearby unknown"
@@ -88,6 +91,7 @@ def test_evidence_tiers_precede_distance_and_fresh_sufficient_uses_distance_as_t
 
 
 def test_fresh_partial_is_after_confirmed_sufficient_and_before_stale():
+    now = utcnow()
     confirmed = candidate("Confirmed", latitude=24.801, longitude=93.941)
     partial = candidate(
         "Partial",
@@ -97,6 +101,8 @@ def test_fresh_partial_is_after_confirmed_sufficient_and_before_stale():
         latitude=24.8001,
         longitude=93.9401,
     )
+    confirmed.source_updated_at = now - timedelta(hours=2)
+    partial.source_updated_at = now - timedelta(hours=2)
     stale = candidate(
         "Stale",
         section=Section.B_UNCERTAIN,
@@ -105,11 +111,49 @@ def test_fresh_partial_is_after_confirmed_sufficient_and_before_stale():
         latitude=24.8001,
         longitude=93.9401,
     )
+    stale.source_updated_at = now - timedelta(hours=72)
 
-    ranked = rank([stale, partial, confirmed])
+    ranked = rank([stale, partial, confirmed], now=now)
 
     assert [item.bank.name for item in ranked] == ["Confirmed", "Partial", "Stale"]
     assert [item.ranking_tier for item in ranked] == [1, 2, 3]
+
+
+def test_freshness_precedes_stock_class_then_surplus_quantity_precedes_distance():
+    now = utcnow()
+    freshest_time = now - timedelta(hours=1)
+    stale_time = now - timedelta(hours=72)
+    distant_surplus = candidate("Distant surplus", quantity=8, latitude=25.8, longitude=93.94)
+    closer_surplus = candidate("Closer surplus", quantity=6, latitude=24.801, longitude=93.941)
+    exact = candidate("Exact quantity", quantity=5, latitude=24.8005, longitude=93.9405)
+    partial = candidate(
+        "Partial",
+        section=Section.C_INSUFFICIENT,
+        match_state=MatchState.INSUFFICIENT,
+        quantity=4,
+        latitude=24.8001,
+        longitude=93.9401,
+    )
+    stale_surplus = candidate("Stale surplus", quantity=12, latitude=24.80001, longitude=93.94001)
+    for item in (distant_surplus, closer_surplus, exact, partial):
+        item.source_updated_at = freshest_time
+    stale_surplus.source_updated_at = stale_time
+    stale_surplus.evidence_state = EvidenceState.STALE
+    stale_surplus.section = Section.B_UNCERTAIN
+
+    ranked = rank(
+        [stale_surplus, partial, exact, closer_surplus, distant_surplus],
+        now=now,
+        requested_quantity=5,
+    )
+
+    assert [item.bank.name for item in ranked] == [
+        "Distant surplus",
+        "Closer surplus",
+        "Exact quantity",
+        "Partial",
+        "Stale surplus",
+    ]
 
 
 def test_synthetic_inventory_never_outranks_live_unknown_stock():
