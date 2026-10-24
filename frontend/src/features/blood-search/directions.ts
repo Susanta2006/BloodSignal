@@ -1,4 +1,3 @@
-
 import { validLatLon, type LatLon } from "@/features/blood-search/distance";
 
 export const travelModes = [
@@ -24,15 +23,23 @@ export type FacilityDestination = {
 export function buildGoogleMapsEmbedUrl(
   facility: FacilityDestination,
   origin?: LatLon | null,
+  originText?: string | null,
+  travelMode: TravelMode = "driving",
 ): string | null {
   if (!hasFacilityCoordinates(facility)) return null;
 
   const destination = `${facility.latitude},${facility.longitude}`;
+  const directionsFlag =
+    travelMode === "walking" ? "w" : travelMode === "transit" ? "r" : "d";
   const params = new URLSearchParams({ output: "embed" });
   if (validLatLon(origin)) {
     params.set("saddr", `${origin.latitude},${origin.longitude}`);
     params.set("daddr", destination);
-    params.set("dirflg", "d");
+    params.set("dirflg", directionsFlag);
+  } else if (usableText(originText)) {
+    params.set("saddr", originText.trim());
+    params.set("daddr", destination);
+    params.set("dirflg", directionsFlag);
   } else {
     params.set("q", destination);
     params.set("z", "15");
@@ -73,9 +80,7 @@ function validCoordinates(
   );
 }
 
-export function hasFacilityCoordinates(
-  facility: FacilityDestination,
-): boolean {
+export function hasFacilityCoordinates(facility: FacilityDestination): boolean {
   return validCoordinates(facility.latitude, facility.longitude);
 }
 
@@ -84,11 +89,9 @@ export function hasReliableFacilityDestination(
 ): boolean {
   if (hasFacilityCoordinates(facility)) return true;
 
-  const locality = [
-    facility.city,
-    facility.district,
-    facility.state,
-  ].some(usableText);
+  const locality = [facility.city, facility.district, facility.state].some(
+    usableText,
+  );
 
   return (
     (usableText(facility.name) && locality) ||
@@ -109,10 +112,7 @@ export function buildDirectionsUrl(
   const params = new URLSearchParams({ api: "1" });
 
   if (hasFacilityCoordinates(facility)) {
-    params.set(
-      "destination",
-      `${facility.latitude},${facility.longitude}`,
-    );
+    params.set("destination", `${facility.latitude},${facility.longitude}`);
 
     const googleMode =
       travelMode === "walking"

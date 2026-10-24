@@ -60,18 +60,57 @@ describe("ranked candidate eligibility", () => {
   });
 
   it("keeps positive partial stock available for ranking but hides zero or negative stock", () => {
-    const partial = { ...valid, section: "C_INSUFFICIENT", quantity_reported: 1 };
+    const partial = {
+      ...valid,
+      section: "C_INSUFFICIENT",
+      quantity_reported: 1,
+    };
     expect(hasPositiveReportedStock(partial, request)).toBe(true);
     expect(isConfirmedCandidate(partial, request)).toBe(false);
-    expect(hasReportedNonPositiveStock({ ...valid, quantity_reported: 0 })).toBe(true);
-    expect(hasReportedNonPositiveStock({ ...valid, quantity_reported: -1 })).toBe(true);
-    expect(hasPositiveReportedStock({ ...valid, quantity_reported: 0 }, request)).toBe(false);
+    expect(
+      hasReportedNonPositiveStock({ ...valid, quantity_reported: 0 }),
+    ).toBe(true);
+    expect(
+      hasReportedNonPositiveStock({ ...valid, quantity_reported: -1 }),
+    ).toBe(true);
+    expect(
+      hasPositiveReportedStock({ ...valid, quantity_reported: 0 }, request),
+    ).toBe(false);
+  });
+
+  it("keeps stale exact sufficient stock visible as unconfirmed, never as a fresh match", () => {
+    const staleSufficient = {
+      ...valid,
+      section: "B_UNCERTAIN",
+      match_state: "MATCHED_REPORTED",
+      evidence_state: "STALE",
+      verified_for_search: false,
+      quantity_reported: 3,
+    };
+
+    expect(hasPositiveReportedStock(staleSufficient, request)).toBe(true);
+    expect(isConfirmedCandidate(staleSufficient, request)).toBe(false);
+    expect(hasReportedNonPositiveStock(staleSufficient)).toBe(false);
+    expect(
+      hasPositiveReportedStock(
+        { ...staleSufficient, quantity_reported: 0 },
+        request,
+      ),
+    ).toBe(false);
   });
 
   it("does not let mismatched, unknown, insufficient or demo records enter a call list", () => {
-    expect(isReviewableCandidate({ ...valid, section: "D_MISMATCH" }, request)).toBe(false);
-    expect(isReviewableCandidate({ ...valid, section: "E_UNKNOWN" }, request)).toBe(false);
-    expect(isReviewableCandidate({ ...valid, section: "C_INSUFFICIENT" }, request)).toBe(false);
-    expect(isReviewableCandidate({ ...valid, source_type: "demo" }, request)).toBe(false);
+    expect(
+      isReviewableCandidate({ ...valid, section: "D_MISMATCH" }, request),
+    ).toBe(false);
+    expect(
+      isReviewableCandidate({ ...valid, section: "E_UNKNOWN" }, request),
+    ).toBe(false);
+    expect(
+      isReviewableCandidate({ ...valid, section: "C_INSUFFICIENT" }, request),
+    ).toBe(false);
+    expect(
+      isReviewableCandidate({ ...valid, source_type: "demo" }, request),
+    ).toBe(false);
   });
 });

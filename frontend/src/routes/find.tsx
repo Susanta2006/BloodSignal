@@ -266,6 +266,14 @@ function formatTime(value: string): string {
     : date.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Kolkata" });
 }
 
+function formatDuration(seconds: number): string {
+  const minutes = Math.max(0, Math.round(seconds / 60));
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes ? `${hours} hr ${remainingMinutes} min` : `${hours} hr`;
+}
+
 function telephoneHref(value: string | undefined): string | null {
   if (!value || !/^[+\d().\s-]+$/.test(value.trim())) return null;
   if ((value.match(/\+/g) ?? []).length > 1 || value.trim().indexOf("+") > 0) return null;
@@ -585,9 +593,30 @@ function BloodSearchPage() {
     }
   };
 
-  const sharedDeviceOrigin = lastPayload?.location?.mode === "device"
-    ? { latitude: lastPayload.location.latitude, longitude: lastPayload.location.longitude }
-    : null;
+  const sharedDeviceOrigin = useMemo(
+    () => {
+      const selectedLocation = lastPayload?.location;
+      if (selectedLocation?.mode !== "device") return null;
+      return {
+        latitude: selectedLocation.latitude,
+        longitude: selectedLocation.longitude,
+      };
+    },
+    [lastPayload],
+  );
+
+  const eligibilityRequest = useMemo(
+    () =>
+      lastPayload
+        ? {
+            blood_group: lastPayload.blood_group,
+            component: lastPayload.component,
+            quantity: lastPayload.quantity,
+            quantity_unit: lastPayload.quantity_unit,
+          }
+        : null,
+    [lastPayload],
+  );
 
   const sortedCandidates = useMemo(() => {
     return [...candidates].sort((a, b) => {
@@ -617,33 +646,54 @@ function BloodSearchPage() {
         if (difference !== 0) return difference;
       }
       if (sortMode === "distance") {
-        const tierOf = (candidate: Candidate) =>
-          typeof candidate["ranking_tier"] === "number" &&
-          Number.isFinite(candidate["ranking_tier"])
-            ? candidate["ranking_tier"]
-            : Number.MAX_SAFE_INTEGER;
-        const tierA = tierOf(a);
-        const tierB = tierOf(b);
-        if (tierA !== tierB) return tierA - tierB;
+        const sourcePriority = (candidate: Candidate) =>
+          candidate["source_type"] === "demo"
+            ? 2
+            : hasPositiveReportedStock(candidate, eligibilityRequest)
+              ? 0
+              : 1;
+        const sourceDifference = sourcePriority(a) - sourcePriority(b);
+        if (sourceDifference !== 0) return sourceDifference;
 
-        // Within the partial-stock tier, show higher positive quantities first;
-        // distance then breaks ties between equally useful reports.
-        if (
-          a["section"] === "C_INSUFFICIENT" &&
-          b["section"] === "C_INSUFFICIENT"
-        ) {
-          const quantityOf = (candidate: Candidate) => {
-            const stock = asValue(candidate["stock"] ?? candidate["availability"]);
-            const value = candidate["quantity_reported"] ?? stock["quantity"];
-            return typeof value === "number" && Number.isFinite(value) ? value : -1;
-          };
-          const quantityDifference = quantityOf(b) - quantityOf(a);
-          if (quantityDifference !== 0) return quantityDifference;
-        }
+        const freshnessBucket = (candidate: Candidate) =>
+          candidate["evidence_state"] === "FRESH"
+            ? 0
+            : candidate["evidence_state"] === "STALE"
+              ? 1
+              : 2;
+        const freshnessDifference = freshnessBucket(a) - freshnessBucket(b);
+        if (freshnessDifference !== 0) return freshnessDifference;
+
+        const updatedOf = (candidate: Candidate) => {
+          const stock = asValue(candidate["stock"] ?? candidate["availability"]);
+          const raw = candidate["source_updated_at"] ?? stock["source_updated_at"];
+          if (typeof raw !== "string") return Number.NEGATIVE_INFINITY;
+          const time = Date.parse(raw);
+          return Number.isFinite(time) ? time : Number.NEGATIVE_INFINITY;
+        };
+        const updateDifference = updatedOf(b) - updatedOf(a);
+        if (updateDifference !== 0) return updateDifference;
+
+        const quantityOf = (candidate: Candidate) => {
+          const stock = asValue(candidate["stock"] ?? candidate["availability"]);
+          const value = candidate["quantity_reported"] ?? stock["quantity"];
+          return typeof value === "number" && Number.isFinite(value) ? value : -1;
+        };
+        const availabilityOf = (candidate: Candidate) => {
+          if (!hasPositiveReportedStock(candidate, eligibilityRequest)) return 3;
+          const quantity = quantityOf(candidate);
+          const requested = eligibilityRequest?.quantity ?? 0;
+          return quantity > requested ? 0 : quantity === requested ? 1 : 2;
+        };
+        const availabilityDifference = availabilityOf(a) - availabilityOf(b);
+        if (availabilityDifference !== 0) return availabilityDifference;
+        const quantityDifference = quantityOf(b) - quantityOf(a);
+        if (quantityDifference !== 0) return quantityDifference;
+
         const distanceA = candidateDistanceKm(a, sharedDeviceOrigin);
         const distanceB = candidateDistanceKm(b, sharedDeviceOrigin);
-        // Availability/evidence tier stays ahead of proximity. Within the same tier,
-        // known straight-line distances sort nearest-first; unknowns follow.
+        // Freshness/evidence and stock quantity stay ahead of proximity; known
+        // straight-line distances sort nearest-first, with unknowns following.
         if (distanceA !== null && distanceB !== null && distanceA !== distanceB)
           return distanceA - distanceB;
         if (distanceA !== null && distanceB === null) return -1;
@@ -658,36 +708,24 @@ function BloodSearchPage() {
         )
       );
     });
-  }, [candidates, sortMode, sharedDeviceOrigin?.latitude, sharedDeviceOrigin?.longitude]);
-
-  const eligibilityRequest = lastPayload
-    ? {
-        blood_group: lastPayload.blood_group,
-        component: lastPayload.component,
-        quantity: lastPayload.quantity,
-        quantity_unit: lastPayload.quantity_unit,
-      }
-    : null;
+  }, [candidates, sortMode, sharedDeviceOrigin, eligibilityRequest]);
   const confirmedCandidates = useMemo(
     () => sortedCandidates.filter((candidate) =>
       !hasReportedNonPositiveStock(candidate) &&
       isConfirmedCandidate(candidate, eligibilityRequest)),
-    [sortedCandidates, lastPayload?.blood_group, lastPayload?.component, lastPayload?.quantity,
-      lastPayload?.quantity_unit],
+    [sortedCandidates, eligibilityRequest],
   );
   const positiveStockCandidates = useMemo(
     () => sortedCandidates.filter((candidate) =>
       !hasReportedNonPositiveStock(candidate) &&
       hasPositiveReportedStock(candidate, eligibilityRequest)),
-    [sortedCandidates, lastPayload?.blood_group, lastPayload?.component, lastPayload?.quantity,
-      lastPayload?.quantity_unit],
+    [sortedCandidates, eligibilityRequest],
   );
   const otherCandidates = useMemo(
     () => sortedCandidates.filter((candidate) =>
       !hasReportedNonPositiveStock(candidate) &&
       !hasPositiveReportedStock(candidate, eligibilityRequest)),
-    [sortedCandidates, lastPayload?.blood_group, lastPayload?.component, lastPayload?.quantity,
-      lastPayload?.quantity_unit],
+    [sortedCandidates, eligibilityRequest],
   );
   const visibleCandidates = [...positiveStockCandidates, ...otherCandidates];
   const showingOtherResults = showOtherResults && positiveStockCandidates.length > 0;
@@ -710,13 +748,14 @@ function BloodSearchPage() {
   }, [resultsPageCount]);
 
   const mapFacilities = useMemo<FacilityMapItem[]>(() => {
-    return paginatedCandidates.flatMap((candidate, index) => {
+    return shownCandidates.flatMap((candidate, index) => {
       const coordinates = getFacilityCoordinates(candidate);
       const name = label(candidate["bank_name"] ?? candidate["name"]);
       if (!coordinates || !name) return [];
 
       const id = label(candidate["candidate_id"] ?? candidate["id"]);
       const address = label(candidate["address"] ?? candidate["formatted_address"]);
+      const locationNote = label(candidate["location_note"]);
       return [
         {
           id: id || `facility-${index}`,
@@ -727,11 +766,11 @@ function BloodSearchPage() {
           ...(candidateLocationPrecision(candidate)
             ? { location_precision: candidateLocationPrecision(candidate) as "LOCALITY" | "FACILITY" }
             : {}),
-          ...(label(candidate["location_note"]) ? { location_note: label(candidate["location_note"]) } : {}),
+          ...(locationNote ? { location_note: locationNote } : {}),
         },
       ];
     });
-  }, [paginatedCandidates]);
+  }, [shownCandidates]);
 
   const loadCandidates = useCallback(async (runId: string) => {
     try {
@@ -912,8 +951,8 @@ function BloodSearchPage() {
             if (settled || requestId !== deviceLocationRequestId.current) return;
             if (!fallbackStarted && error.code !== error.PERMISSION_DENIED) {
               fallbackStarted = true;
-              setMessage("High-accuracy location was unavailable; trying the browser’s network-assisted location.");
-              requestPosition(false, 18000, 300000);
+              setMessage("Approximate browser location was unavailable; trying higher-accuracy device location.");
+              requestPosition(true, 12000, 0);
               return;
             }
             const reason = error.code === error.PERMISSION_DENIED
@@ -930,22 +969,18 @@ function BloodSearchPage() {
       } catch {
         if (!fallbackStarted) {
           fallbackStarted = true;
-          requestPosition(false, 18000, 300000);
+          requestPosition(true, 12000, 0);
         } else {
           finishWithError("Device location could not be accessed. Check browser and operating-system location settings.");
         }
       }
     };
 
-    requestPosition(true, 12000, 0);
+    // Prefer the browser's network-assisted location first. This works better on
+    // laptops and desktops that do not have a GPS receiver; use high accuracy only
+    // as a fallback when the browser cannot provide an approximate position.
+    requestPosition(false, 18000, 120000);
   };
-
-  useEffect(() => {
-    // Request permission automatically on page entry; browser permission remains user-controlled.
-    requestDeviceLocation();
-    // One request per page mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const validateForm = (): SearchRequest | null => {
     const district = values.district.trim();
@@ -1388,7 +1423,7 @@ function BloodSearchPage() {
                       ? "Requesting device location… Your browser may ask for permission."
                       : deviceLocationStatus === "error"
                         ? "Device location unavailable. Enter the state and district below; distance will be shown only when valid coordinates are available."
-                        : "Device location is requested automatically when this page opens."}
+                       : "Select Try device location to request a browser location. HTTPS or localhost is required."}
                 </p>
                 <Button
                   type="button"
@@ -1741,12 +1776,12 @@ function BloodSearchPage() {
                       value={sortMode}
                       onValueChange={(value) => setSortMode(value as typeof sortMode)}
                     >
-                      <SelectTrigger id="sort" className="h-9 w-32 rounded-sm">
+                      <SelectTrigger id="sort" className="h-9 w-48 rounded-sm">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="relevance">Relevance</SelectItem>
-                        <SelectItem value="distance">Nearest first</SelectItem>
+                        <SelectItem value="distance">Priority & proximity</SelectItem>
                         <SelectItem value="quantity">Most reported units</SelectItem>
                         <SelectItem value="updated">Most recently updated</SelectItem>
                         <SelectItem value="name">Name</SelectItem>
@@ -1756,16 +1791,25 @@ function BloodSearchPage() {
                 </div>
                 <div className="mb-4 flex flex-wrap items-center gap-3">
                   <p className="text-xs text-muted-foreground">
-                    Nearest-first uses only shared user coordinates and validated facility
-                    coordinates.
+                    Priority is live exact positive stock, freshness, surplus/exact/partial
+                    quantity, then validated straight-line distance—not road distance.
                   </p>
                 </div>
                 {viewMode === "map" ? (
                   <div className="mb-5">
-                    <BloodBankMap facilities={mapFacilities} origin={sharedDeviceOrigin} />
-                    {mapFacilities.length < paginatedCandidates.length ? (
+                    <BloodBankMap
+                      facilities={mapFacilities}
+                      origin={sharedDeviceOrigin}
+                      originLabel={
+                        lastPayload?.location.mode === "manual"
+                          ? `${lastPayload.location.district}, ${lastPayload.location.state}, India`
+                          : null
+                      }
+                      travelMode={travelMode}
+                    />
+                    {mapFacilities.length < shownCandidates.length ? (
                       <p className="mt-3 text-xs leading-5 text-muted-foreground">
-                        {paginatedCandidates.length - mapFacilities.length} result(s) omitted from the
+                        {shownCandidates.length - mapFacilities.length} result(s) omitted from the
                         map because reliable coordinates or a facility name were not provided. These
                         results remain available in the list below.
                       </p>
@@ -1855,6 +1899,18 @@ function BloodSearchPage() {
                             candidate["quantity_unit_reported"] ?? stock["quantity_unit"],
                           );
                           const coordinates = getFacilityCoordinates(candidate);
+                          const routeMeters =
+                            typeof candidate["route_meters"] === "number" &&
+                            Number.isFinite(candidate["route_meters"]) &&
+                            candidate["route_meters"] >= 0
+                              ? candidate["route_meters"]
+                              : null;
+                          const routeSeconds =
+                            typeof candidate["route_seconds"] === "number" &&
+                            Number.isFinite(candidate["route_seconds"]) &&
+                            candidate["route_seconds"] >= 0
+                              ? candidate["route_seconds"]
+                              : null;
                           const facilityDestination = {
                             name,
                             ...(coordinates ?? {}),
@@ -1976,7 +2032,7 @@ function BloodSearchPage() {
                                 ) : null}
                                 {sortMode === "distance" ? (
                                   <div className="mt-2 max-w-64 text-xs leading-5 text-muted-foreground">
-                                    Rank reason: availability/evidence first, then quantity for partial reports, then nearest validated straight-line distance. This is not road distance or travel time.
+                                    Rank reason: source trust, then freshness, stock amount, and nearest validated straight-line distance. This is not road distance or travel time.
                                   </div>
                                 ) : label(candidate["ranking_explanation"]) ? (
                                   <div className="mt-2 max-w-64 text-xs leading-5 text-muted-foreground">
@@ -2054,6 +2110,13 @@ function BloodSearchPage() {
                                       : "Reliable destination unavailable"}
                                   </span>
                                 )}
+                                {routeMeters !== null && routeSeconds !== null ? (
+                                  <p className="mt-2 max-w-56 text-xs leading-5 text-muted-foreground">
+                                    Computed driving route: {(routeMeters / 1000).toFixed(1)} km ·{" "}
+                                    {formatDuration(routeSeconds)}. Google Maps can show turn-by-turn
+                                    directions and alternatives.
+                                  </p>
+                                ) : null}
                                 {!hasDirectionsDestination && !syntheticFacility ? (
                                   <span className="sr-only">
                                     Reliable location information is unavailable.
