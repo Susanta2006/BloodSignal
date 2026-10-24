@@ -20,6 +20,15 @@ function number(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function reportedQuantity(candidate: CandidateRecord): number | null {
+  const stock = candidate["stock"] ?? candidate["availability"];
+  const record =
+    typeof stock === "object" && stock !== null && !Array.isArray(stock)
+      ? (stock as CandidateRecord)
+      : {};
+  return number(candidate["quantity_reported"] ?? record["quantity"]);
+}
+
 function componentKey(value: unknown): string {
   return text(value).toLowerCase().replace(/[\s-]+/g, "_");
 }
@@ -67,6 +76,36 @@ export function isConfirmedCandidate(
     unit !== "" &&
     unit === requestedUnit
   );
+}
+
+/** Positive, exact-scope reports can be ranked, including partial or stale reports. */
+export function hasPositiveReportedStock(
+  candidate: CandidateRecord,
+  request: EligibilityRequest | null,
+): boolean {
+  if (!request || !sameRequestFields(candidate, request)) return false;
+  const quantity = reportedQuantity(candidate);
+  const stock = candidate["stock"] ?? candidate["availability"];
+  const record =
+    typeof stock === "object" && stock !== null && !Array.isArray(stock)
+      ? (stock as CandidateRecord)
+      : {};
+  const unit = text(candidate["quantity_unit_reported"] ?? record["quantity_unit"]).toLowerCase();
+  const status = text(candidate["reported_status"] ?? record["reported_status"]).toLowerCase();
+  const matchState = text(candidate["match_state"]);
+  return (
+    quantity !== null &&
+    quantity > 0 &&
+    unit === request.quantity_unit.toLowerCase() &&
+    status !== "unavailable" &&
+    (matchState === "MATCHED_REPORTED" || matchState === "INSUFFICIENT")
+  );
+}
+
+/** Explicitly depleted/invalid quantities must not be rendered as available results. */
+export function hasReportedNonPositiveStock(candidate: CandidateRecord): boolean {
+  const quantity = reportedQuantity(candidate);
+  return quantity !== null && quantity <= 0;
 }
 
 /** Only eligible or correctly scoped uncertain live stock can enter a human-review call list. */

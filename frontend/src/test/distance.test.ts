@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { haversineDistanceKm, validLatLon } from "@/features/blood-search/distance";
+import {
+  facilityDistanceKm,
+  haversineDistanceKm,
+  validLatLon,
+} from "@/features/blood-search/distance";
 
 describe("straight-line distance calculations", () => {
   it("calculates a known short distance in kilometres", () => {
@@ -21,5 +25,25 @@ describe("straight-line distance calculations", () => {
     expect(validLatLon({ latitude: 91, longitude: 0 })).toBe(false);
     expect(haversineDistanceKm(null, { latitude: 0, longitude: 0 })).toBeNull();
     expect(haversineDistanceKm({ latitude: 0, longitude: Number.NaN }, { latitude: 0, longitude: 0 })).toBeNull();
+    expect(validLatLon({ latitude: "24.8" as unknown as number, longitude: 93.9 })).toBe(false);
+  });
+
+  it("does not calculate facility distance from a locality-centre pin", () => {
+    expect(
+      facilityDistanceKm(
+        { latitude: 24.8, longitude: 93.9 },
+        { latitude: 24.81, longitude: 93.91 },
+        "LOCALITY",
+      ),
+    ).toBeNull();
+  });
+
+  it("uses the shortest longitude difference across the antimeridian", () => {
+    expect(
+      haversineDistanceKm(
+        { latitude: 0, longitude: 179.9 },
+        { latitude: 0, longitude: -179.9 },
+      ),
+    ).toBeCloseTo(22.239, 2);
   });
 });

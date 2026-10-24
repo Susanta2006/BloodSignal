@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { isConfirmedCandidate, isReviewableCandidate } from "@/features/blood-search/eligibility";
+import {
+  hasPositiveReportedStock,
+  hasReportedNonPositiveStock,
+  isConfirmedCandidate,
+  isReviewableCandidate,
+} from "@/features/blood-search/eligibility";
 
 const request = {
   blood_group: "O-",
@@ -52,6 +57,15 @@ describe("ranked candidate eligibility", () => {
     };
     expect(isConfirmedCandidate(uncertain, request)).toBe(false);
     expect(isReviewableCandidate(uncertain, request)).toBe(true);
+  });
+
+  it("keeps positive partial stock available for ranking but hides zero or negative stock", () => {
+    const partial = { ...valid, section: "C_INSUFFICIENT", quantity_reported: 1 };
+    expect(hasPositiveReportedStock(partial, request)).toBe(true);
+    expect(isConfirmedCandidate(partial, request)).toBe(false);
+    expect(hasReportedNonPositiveStock({ ...valid, quantity_reported: 0 })).toBe(true);
+    expect(hasReportedNonPositiveStock({ ...valid, quantity_reported: -1 })).toBe(true);
+    expect(hasPositiveReportedStock({ ...valid, quantity_reported: 0 }, request)).toBe(false);
   });
 
   it("does not let mismatched, unknown, insufficient or demo records enter a call list", () => {

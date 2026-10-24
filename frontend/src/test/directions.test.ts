@@ -1,12 +1,34 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildGoogleMapsEmbedUrl,
   buildDirectionsUrl,
   hasReliableFacilityDestination,
   travelModes,
 } from "@/features/blood-search/directions";
 
 describe("Google Maps destination URLs", () => {
+  it("embeds a route from the shared device origin to the selected facility", () => {
+    const url = buildGoogleMapsEmbedUrl(
+      { latitude: 24.81, longitude: 93.91 },
+      { latitude: 24.8, longitude: 93.9 },
+    );
+    const parsed = new URL(url!);
+
+    expect(parsed.origin + parsed.pathname).toBe("https://maps.google.com/maps");
+    expect(parsed.searchParams.get("saddr")).toBe("24.8,93.9");
+    expect(parsed.searchParams.get("daddr")).toBe("24.81,93.91");
+    expect(parsed.searchParams.get("dirflg")).toBe("d");
+  });
+
+  it("shows only a facility pin when no device origin was shared", () => {
+    const url = buildGoogleMapsEmbedUrl({ latitude: 24.81, longitude: 93.91 });
+    const parsed = new URL(url!);
+
+    expect(parsed.searchParams.get("q")).toBe("24.81,93.91");
+    expect(parsed.searchParams.has("saddr")).toBe(false);
+  });
+
   it("uses validated facility coordinates before its address and leaves origin unspecified", () => {
     const url = buildDirectionsUrl(
       {

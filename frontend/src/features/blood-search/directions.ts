@@ -1,4 +1,6 @@
 
+import { validLatLon, type LatLon } from "@/features/blood-search/distance";
+
 export const travelModes = [
   "driving",
   "walking",
@@ -17,6 +19,26 @@ export type FacilityDestination = {
   latitude?: number | null;
   longitude?: number | null;
 };
+
+/** A no-key Google Maps embed for a selected destination, optionally showing a route from GPS. */
+export function buildGoogleMapsEmbedUrl(
+  facility: FacilityDestination,
+  origin?: LatLon | null,
+): string | null {
+  if (!hasFacilityCoordinates(facility)) return null;
+
+  const destination = `${facility.latitude},${facility.longitude}`;
+  const params = new URLSearchParams({ output: "embed" });
+  if (validLatLon(origin)) {
+    params.set("saddr", `${origin.latitude},${origin.longitude}`);
+    params.set("daddr", destination);
+    params.set("dirflg", "d");
+  } else {
+    params.set("q", destination);
+    params.set("z", "15");
+  }
+  return `https://maps.google.com/maps?${params.toString()}`;
+}
 
 const INVALID_VALUES = new Set([
   "unknown",
@@ -108,16 +130,18 @@ export function buildDirectionsUrl(
     return `https://www.google.com/maps/dir/?${params.toString()}`;
   }
 
-  const structured = [
-    facility.name,
-    facility.address,
-    facility.city,
-    facility.district,
-    facility.state,
-  ]
+  const locality = [facility.city, facility.district, facility.state]
     .filter(usableText)
     .map((value) => value.trim())
     .filter((value, index, all) => all.indexOf(value) === index);
+  const facilityIdentity = usableText(facility.name)
+    ? facility.name.trim()
+    : usableText(facility.address)
+      ? facility.address.trim()
+      : null;
+  const structured = [facilityIdentity, ...locality].filter(
+    (value): value is string => value !== null,
+  );
 
   if (structured.length === 0) return null;
 

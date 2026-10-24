@@ -58,8 +58,13 @@ import {
   type SearchRequest,
 } from "@/features/blood-search/contracts";
 import { evidenceState } from "@/features/blood-search/evidence";
-import { isConfirmedCandidate, isReviewableCandidate } from "@/features/blood-search/eligibility";
-import { haversineDistanceKm } from "@/features/blood-search/distance";
+import {
+  hasPositiveReportedStock,
+  hasReportedNonPositiveStock,
+  isConfirmedCandidate,
+  isReviewableCandidate,
+} from "@/features/blood-search/eligibility";
+import { facilityDistanceKm, validLatLon } from "@/features/blood-search/distance";
 import { componentOptions, componentDisplayName, eraktkoshStates } from "@/features/blood-search/eraktkosh-catalog";
 import { districtsByState, nearbyDistrictSuggestions } from "@/features/blood-search/district-catalog";
 import { BloodBankMap, type FacilityMapItem } from "@/features/blood-search/BloodBankMap";
@@ -221,14 +226,33 @@ function getFacilityCoordinates(
   return { latitude, longitude };
 }
 
+function candidateLocationPrecision(candidate: Candidate): "FACILITY" | "LOCALITY" | null {
+  const nestedBank = candidate["bank"];
+  const bankRecord =
+    nestedBank && typeof nestedBank === "object"
+      ? (nestedBank as Record<string, unknown>)
+      : undefined;
+  const precision = candidate["location_precision"] ?? bankRecord?.["location_precision"];
+  return precision === "FACILITY" || precision === "LOCALITY" ? precision : null;
+}
+
 function candidateDistanceKm(
   candidate: Candidate,
   origin: { latitude: number; longitude: number } | null,
 ): number | null {
+  if (
+    candidateLocationPrecision(candidate) === "LOCALITY" ||
+    (typeof candidate["distance_unavailable_reason"] === "string" &&
+      candidate["distance_unavailable_reason"].trim() !== "")
+  ) return null;
   const reported = candidate["distance_km"];
   if (typeof reported === "number" && Number.isFinite(reported) && reported >= 0) return reported;
   if (!origin) return null;
-  return haversineDistanceKm(origin, getFacilityCoordinates(candidate));
+  return facilityDistanceKm(
+    origin,
+    getFacilityCoordinates(candidate),
+    candidateLocationPrecision(candidate),
+  );
 }
 
 function componentLabel(value: string): string {
@@ -593,10 +617,33 @@ function BloodSearchPage() {
         if (difference !== 0) return difference;
       }
       if (sortMode === "distance") {
+        const tierOf = (candidate: Candidate) =>
+          typeof candidate["ranking_tier"] === "number" &&
+          Number.isFinite(candidate["ranking_tier"])
+            ? candidate["ranking_tier"]
+            : Number.MAX_SAFE_INTEGER;
+        const tierA = tierOf(a);
+        const tierB = tierOf(b);
+        if (tierA !== tierB) return tierA - tierB;
+
+        // Within the partial-stock tier, show higher positive quantities first;
+        // distance then breaks ties between equally useful reports.
+        if (
+          a["section"] === "C_INSUFFICIENT" &&
+          b["section"] === "C_INSUFFICIENT"
+        ) {
+          const quantityOf = (candidate: Candidate) => {
+            const stock = asValue(candidate["stock"] ?? candidate["availability"]);
+            const value = candidate["quantity_reported"] ?? stock["quantity"];
+            return typeof value === "number" && Number.isFinite(value) ? value : -1;
+          };
+          const quantityDifference = quantityOf(b) - quantityOf(a);
+          if (quantityDifference !== 0) return quantityDifference;
+        }
         const distanceA = candidateDistanceKm(a, sharedDeviceOrigin);
         const distanceB = candidateDistanceKm(b, sharedDeviceOrigin);
-        // When comparable coordinate-based distances exist, nearest facility wins regardless
-        // of inventory tier. Unknown distances remain visible after facilities with distances.
+        // Availability/evidence tier stays ahead of proximity. Within the same tier,
+        // known straight-line distances sort nearest-first; unknowns follow.
         if (distanceA !== null && distanceB !== null && distanceA !== distanceB)
           return distanceA - distanceB;
         if (distanceA !== null && distanceB === null) return -1;
@@ -622,18 +669,39 @@ function BloodSearchPage() {
       }
     : null;
   const confirmedCandidates = useMemo(
-    () => sortedCandidates.filter((candidate) => isConfirmedCandidate(candidate, eligibilityRequest)),
+    () => sortedCandidates.filter((candidate) =>
+      !hasReportedNonPositiveStock(candidate) &&
+      isConfirmedCandidate(candidate, eligibilityRequest)),
+    [sortedCandidates, lastPayload?.blood_group, lastPayload?.component, lastPayload?.quantity,
+      lastPayload?.quantity_unit],
+  );
+  const positiveStockCandidates = useMemo(
+    () => sortedCandidates.filter((candidate) =>
+      !hasReportedNonPositiveStock(candidate) &&
+      hasPositiveReportedStock(candidate, eligibilityRequest)),
     [sortedCandidates, lastPayload?.blood_group, lastPayload?.component, lastPayload?.quantity,
       lastPayload?.quantity_unit],
   );
   const otherCandidates = useMemo(
-    () => sortedCandidates.filter((candidate) => !isConfirmedCandidate(candidate, eligibilityRequest)),
+    () => sortedCandidates.filter((candidate) =>
+      !hasReportedNonPositiveStock(candidate) &&
+      !hasPositiveReportedStock(candidate, eligibilityRequest)),
     [sortedCandidates, lastPayload?.blood_group, lastPayload?.component, lastPayload?.quantity,
       lastPayload?.quantity_unit],
   );
-  const shownCandidates = showOtherResults ? otherCandidates : confirmedCandidates;
+  const visibleCandidates = [...positiveStockCandidates, ...otherCandidates];
+  const showingOtherResults = showOtherResults && positiveStockCandidates.length > 0;
+  const shownCandidates = showingOtherResults
+    ? otherCandidates
+    : positiveStockCandidates.length > 0
+      ? positiveStockCandidates
+      : otherCandidates;
+  const hiddenNonPositiveCount = sortedCandidates.filter(hasReportedNonPositiveStock).length;
   const resultsPageCount = Math.max(1, Math.ceil(shownCandidates.length / 5));
-  const paginatedCandidates = shownCandidates.slice((resultPage - 1) * 5, resultPage * 5);
+  const paginatedCandidates = useMemo(
+    () => shownCandidates.slice((resultPage - 1) * 5, resultPage * 5),
+    [shownCandidates, resultPage],
+  );
   const startEntry = shownCandidates.length ? (resultPage - 1) * 5 + 1 : 0;
   const endEntry = Math.min(resultPage * 5, shownCandidates.length);
 
@@ -656,8 +724,9 @@ function BloodSearchPage() {
           ...(address ? { address } : {}),
           latitude: coordinates.latitude,
           longitude: coordinates.longitude,
-          ...(candidate["location_precision"] === "LOCALITY" || candidate["location_precision"] === "FACILITY"
-            ? { location_precision: candidate["location_precision"] as "LOCALITY" | "FACILITY" } : {}),
+          ...(candidateLocationPrecision(candidate)
+            ? { location_precision: candidateLocationPrecision(candidate) as "LOCALITY" | "FACILITY" }
+            : {}),
           ...(label(candidate["location_note"]) ? { location_note: label(candidate["location_note"]) } : {}),
         },
       ];
@@ -796,9 +865,12 @@ function BloodSearchPage() {
     }
 
     let settled = false;
+    let fallbackStarted = false;
+    let watchdog = 0;
     const finishWithError = (reason: string) => {
       if (settled || requestId !== deviceLocationRequestId.current) return;
       settled = true;
+      window.clearTimeout(watchdog);
       setUseDevice(false);
       setLocation(null);
       setDeviceLocationStatus("error");
@@ -807,39 +879,65 @@ function BloodSearchPage() {
     };
     // Some browser/device combinations fail to fire the Geolocation callback
     // promptly even after permission is granted. Keep the UI from spinning forever.
-    const watchdog = window.setTimeout(() => {
-      finishWithError("The browser did not return a location within 25 seconds. Check system location services, reload the page, and try again.");
-    }, 25000);
+    watchdog = window.setTimeout(() => {
+      finishWithError("The browser did not return a location within 32 seconds. Check site permission and system Location Services, then retry.");
+    }, 32000);
 
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        if (settled || requestId !== deviceLocationRequestId.current) return;
-        settled = true;
-        window.clearTimeout(watchdog);
-        setLocation({
-          mode: "device",
-          latitude: position.coords.latitude,
-          longitude: position.coords.longitude,
-          country: "IN",
-          location_consent: true,
-        });
-        setDeviceLocationStatus("ready");
-        setFormErrors((current) => ({ ...current, location: "" }));
-        setMessage("Device location is ready for this search only.");
-      },
-      (error) => {
-        window.clearTimeout(watchdog);
-        const reason = error.code === error.PERMISSION_DENIED
-          ? "Location permission was denied. Allow location access for this site in browser settings, and also check your operating system's location privacy settings."
-          : error.code === error.POSITION_UNAVAILABLE
-            ? "Permission was granted, but the device could not determine its location. Turn on system Location Services, enable Wi-Fi/location scanning if available, and try again."
-            : error.code === error.TIMEOUT
-              ? "The location request timed out. Turn on system Location Services and try again."
-              : "Device location could not be accessed. Check browser and operating-system location settings.";
-        finishWithError(reason);
-      },
-      { enableHighAccuracy: false, timeout: 22000, maximumAge: 60000 },
-    );
+    const requestPosition = (highAccuracy: boolean, timeout: number, maximumAge: number) => {
+      try {
+        navigator.geolocation.getCurrentPosition(
+          (position) => {
+            if (settled || requestId !== deviceLocationRequestId.current) return;
+            const coordinates = {
+              latitude: position.coords.latitude,
+              longitude: position.coords.longitude,
+            };
+            if (!validLatLon(coordinates)) {
+              finishWithError("The browser returned invalid coordinates. Check system Location Services, then retry.");
+              return;
+            }
+            settled = true;
+            window.clearTimeout(watchdog);
+            setLocation({
+              mode: "device",
+              ...coordinates,
+              country: "IN",
+              location_consent: true,
+            });
+            setDeviceLocationStatus("ready");
+            setFormErrors((current) => ({ ...current, location: "" }));
+            setMessage("Device location is ready for this search only.");
+          },
+          (error) => {
+            if (settled || requestId !== deviceLocationRequestId.current) return;
+            if (!fallbackStarted && error.code !== error.PERMISSION_DENIED) {
+              fallbackStarted = true;
+              setMessage("High-accuracy location was unavailable; trying the browser’s network-assisted location.");
+              requestPosition(false, 18000, 300000);
+              return;
+            }
+            const reason = error.code === error.PERMISSION_DENIED
+              ? "Location permission was denied. Allow location access for this site in browser settings, and also check your operating system's location privacy settings."
+              : error.code === error.POSITION_UNAVAILABLE
+                ? "Permission was granted, but the device could not determine its location. Turn on system Location Services and Wi-Fi/location scanning if available, then retry."
+                : error.code === error.TIMEOUT
+                  ? "The location request timed out. Turn on system Location Services and retry."
+                  : "Device location could not be accessed. Check browser and operating-system location settings.";
+            finishWithError(reason);
+          },
+          { enableHighAccuracy: highAccuracy, timeout, maximumAge },
+        );
+      } catch {
+        if (!fallbackStarted) {
+          fallbackStarted = true;
+          requestPosition(false, 18000, 300000);
+        } else {
+          finishWithError("Device location could not be accessed. Check browser and operating-system location settings.");
+        }
+      }
+    };
+
+    requestPosition(true, 12000, 0);
   };
 
   useEffect(() => {
@@ -1292,6 +1390,17 @@ function BloodSearchPage() {
                         ? "Device location unavailable. Enter the state and district below; distance will be shown only when valid coordinates are available."
                         : "Device location is requested automatically when this page opens."}
                 </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-10 rounded-sm"
+                  disabled={deviceLocationStatus === "requesting"}
+                  onClick={requestDeviceLocation}
+                >
+                  <LocateFixed className="size-4" />
+                  {deviceLocationStatus === "ready" ? "Refresh device location" : "Try device location"}
+                </Button>
                 <div className="grid gap-3 sm:grid-cols-2">
                     <div>
                       <label htmlFor="state" className="mb-1.5 block text-xs font-medium">
@@ -1496,15 +1605,21 @@ function BloodSearchPage() {
               </div>
             ) : null}
 
-            {state === "ready" && !candidates.length ? (
+            {state === "ready" && !visibleCandidates.length ? (
               <div className="border-b border-border py-8">
                 <div className="flex gap-3">
                   <UsersRound className="mt-0.5 size-5 shrink-0 text-muted-foreground" />
                   <div>
-                    <h3 className="font-semibold">No matching results returned</h3>
+                    <h3 className="font-semibold">
+                      {hiddenNonPositiveCount > 0
+                        ? "No positive stock reports returned"
+                        : "No matching results returned"}
+                    </h3>
                     <p className="mt-1 max-w-lg text-sm leading-6 text-muted-foreground">
-                      No blood banks were returned for this request. This does not confirm whether
-                      stock exists.
+                      {hiddenNonPositiveCount > 0
+                        ? `${hiddenNonPositiveCount} zero or negative stock report(s) were excluded. No positive report matched this request in the results.`
+                        : "No blood banks were returned for this request. This does not confirm whether stock exists."}
+                      {" "}This does not confirm whether stock exists elsewhere.
                     </p>
                     {lastPayload && !lastPayload.search_options.include_nearby_districts ? (
                       <>
@@ -1542,7 +1657,7 @@ function BloodSearchPage() {
               </div>
             ) : null}
 
-            {state === "ready" && candidates.length > 0 ? (
+            {state === "ready" && visibleCandidates.length > 0 ? (
               <>
                 {confirmedCandidates.length === 0 ? (
                   <div className="mb-5 border border-border p-4" role="status">
@@ -1568,29 +1683,36 @@ function BloodSearchPage() {
                 <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <p className="text-sm font-medium">
-                      {showOtherResults ? "Other facility records — not confirmed matches" : "Confirmed matching inventory"}
+                      {showingOtherResults
+                        ? "Other facility records — not confirmed matches"
+                        : positiveStockCandidates.length > 0
+                          ? "Positive reported stock — full and partial matches"
+                          : "Other facility records — not confirmed matches"}
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground" aria-live="polite">
                       {shownCandidates.length
-                        ? `Showing ${startEntry}–${endEntry} of ${shownCandidates.length} ${showOtherResults ? "other records" : "eligible facilities"}`
-                        : showOtherResults
+                        ? `Showing ${startEntry}–${endEntry} of ${shownCandidates.length} ${showingOtherResults ? "other records" : "positive stock reports"}`
+                        : showingOtherResults
                           ? "No other facility records were returned."
-                          : "No confirmed matches were returned."}
+                          : "No positive stock reports were returned."}
+                      {hiddenNonPositiveCount > 0
+                        ? ` · ${hiddenNonPositiveCount} zero-stock report(s) hidden`
+                        : ""}
                     </p>
                   </div>
-                  {otherCandidates.length > 0 ? (
+                  {positiveStockCandidates.length > 0 && otherCandidates.length > 0 ? (
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
                       className="rounded-sm"
                       onClick={() => {
-                        setShowOtherResults((current) => !current);
+                        setShowOtherResults(!showingOtherResults);
                         setResultPage(1);
                       }}
                     >
-                      {showOtherResults
-                        ? `Back to confirmed matches (${confirmedCandidates.length})`
+                      {showingOtherResults
+                        ? `Back to positive stock (${positiveStockCandidates.length})`
                         : `Show other records (${otherCandidates.length})`}
                     </Button>
                   ) : null}
@@ -1640,7 +1762,7 @@ function BloodSearchPage() {
                 </div>
                 {viewMode === "map" ? (
                   <div className="mb-5">
-                    <BloodBankMap facilities={mapFacilities} />
+                    <BloodBankMap facilities={mapFacilities} origin={sharedDeviceOrigin} />
                     {mapFacilities.length < paginatedCandidates.length ? (
                       <p className="mt-3 text-xs leading-5 text-muted-foreground">
                         {paginatedCandidates.length - mapFacilities.length} result(s) omitted from the
@@ -1782,9 +1904,7 @@ function BloodSearchPage() {
                                     aria-label={"Select " + name + " for call-list review"}
                                   />
                                   <span className="font-mono text-xs text-muted-foreground">
-                                    {typeof candidate["rank"] === "number"
-                                      ? candidate["rank"]
-                                      : index + 1}
+                                    {(resultPage - 1) * 5 + index + 1}
                                   </span>
                                 </div>
                               </td>
@@ -1856,7 +1976,7 @@ function BloodSearchPage() {
                                 ) : null}
                                 {sortMode === "distance" ? (
                                   <div className="mt-2 max-w-64 text-xs leading-5 text-muted-foreground">
-                                    Rank reason: nearest validated straight-line distance first; unknown distances follow. This is not road distance or travel time.
+                                    Rank reason: availability/evidence first, then quantity for partial reports, then nearest validated straight-line distance. This is not road distance or travel time.
                                   </div>
                                 ) : label(candidate["ranking_explanation"]) ? (
                                   <div className="mt-2 max-w-64 text-xs leading-5 text-muted-foreground">
@@ -1873,9 +1993,9 @@ function BloodSearchPage() {
                               <td className="whitespace-nowrap px-3 py-4">
                                 {typeof distanceKm === "number" && Number.isFinite(distanceKm) ? (
                                   <>
-                                    <div className="font-medium">{distanceKm.toFixed(1)} km</div>
+                                    <div className="font-medium">{distanceKm.toFixed(2)} km</div>
                                     <div className="mt-1 text-xs text-muted-foreground">
-                                      {candidate["location_precision"] === "LOCALITY"
+                                      {candidateLocationPrecision(candidate) === "LOCALITY"
                                         ? "Approx. straight-line from town centre"
                                         : "Approx. straight-line, not road distance"}
                                     </div>
@@ -1885,7 +2005,11 @@ function BloodSearchPage() {
                                     className="text-xs text-muted-foreground"
                                     title={label(candidate["distance_unavailable_reason"])}
                                   >
-                                    {sharedDeviceOrigin ? "Facility coordinates unavailable" : "Share device location to calculate distance"}
+                                    {sharedDeviceOrigin
+                                      ? candidateLocationPrecision(candidate) === "LOCALITY"
+                                        ? "Locality pin only; not used for facility distance"
+                                        : "Facility coordinates unavailable or ambiguous"
+                                      : "Share device location to calculate distance"}
                                   </span>
                                 )}
                               </td>
@@ -2001,7 +2125,7 @@ function BloodSearchPage() {
                             <div><dt className="text-muted-foreground">Requested</dt><dd>{lastPayload ? `${lastPayload.blood_group} · ${componentLabel(lastPayload.component)} · ${lastPayload.quantity} ${lastPayload.quantity_unit}` : "Not available"}</dd></div>
                             <div><dt className="text-muted-foreground">Reported stock</dt><dd>{reportedGroup || "Group not stated"} · {reportedComponent ? componentLabel(reportedComponent) : "Component not stated"} · {typeof reportedQuantity === "number" ? `${reportedQuantity} ${reportedUnit || "units"}` : "Quantity not reported"}</dd></div>
                             <div><dt className="text-muted-foreground">Source updated</dt><dd>{sourceUpdate ? formatTime(sourceUpdate) : "Not reported"}</dd></div>
-                            <div><dt className="text-muted-foreground">Distance</dt><dd>{typeof distanceKm === "number" && Number.isFinite(distanceKm) ? `${distanceKm.toFixed(1)} km straight-line` : "Unavailable"}</dd></div>
+                            <div><dt className="text-muted-foreground">Distance</dt><dd>{typeof distanceKm === "number" && Number.isFinite(distanceKm) ? `${distanceKm.toFixed(2)} km straight-line` : "Unavailable"}</dd></div>
                           </dl>
                           {retrieved ? <p className="mt-2 text-xs text-muted-foreground">Fetched {formatTime(retrieved)}</p> : null}
                           <div className="mt-4 flex flex-wrap gap-2">
