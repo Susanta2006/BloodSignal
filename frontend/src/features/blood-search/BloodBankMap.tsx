@@ -221,10 +221,8 @@ export function BloodBankMap({
           </dt>
           <dd>
             {straightLineKm !== null
-              ? `${selected.location_precision === "LOCALITY" ? "~" : ""}${straightLineKm.toFixed(2)} km (straight-line, not road distance)`
-              : !hasCoordinates
-                ? "Unavailable—facility coordinates not resolved"
-                : "Share device location to calculate distance"}
+              ? `${selected.location_precision === "LOCALITY" ? "~" : ""}${straightLineKm.toFixed(2)} km${selected.location_precision === "LOCALITY" ? " (approx., straight-line)" : " (straight-line, not road distance)"}`
+              : "Unavailable"}
           </dd>
         </div>
       </dl>
