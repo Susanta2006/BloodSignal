@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
-from agents.geocorrect import GeoCorrectAgent
+from app.agents.geocorrect import GeoCorrectAgent
 from app.schemas import BloodBank, NormalizedStockRecord, utcnow
 from app.services.geocoding import NominatimGeocoder
 from app.services.stock_source import (
