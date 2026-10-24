@@ -48,8 +48,9 @@ class Settings(BaseSettings):
     eraktkosh_relay_url: str = ""
     eraktkosh_relay_secret: SecretStr = SecretStr("")
 
-    # Opt-in Nominatim geocoding. Never required for stock-search success.
-    geocoder_enabled: bool = False
+    # Automatic, bounded Nominatim geocoding for missing facility coordinates.
+    # Set GEOCODER_ENABLED=false to disable; a contact email is recommended for deployments.
+    geocoder_enabled: bool = True
     geocoder_contact: str = ""
     geocoder_base_url: str = "https://nominatim.openstreetmap.org/search"
     geocoder_timeout_s: float = Field(2.0, gt=0, le=10)
