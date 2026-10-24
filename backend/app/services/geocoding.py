@@ -21,7 +21,7 @@ class NominatimGeocoder:
                  enabled: bool = False, timeout_s: float = 2.0, max_cache_entries: int = 1000,
                  cooldown_s: float = 900.0, clock=time.monotonic,
                  sleep=asyncio.sleep, transport: httpx.AsyncBaseTransport | None = None):
-        self.enabled = enabled
+        self.enabled = enabled and bool(contact.strip())
         self.contact = contact.strip()
         self.base_url = base_url.rstrip("?")
         self.timeout_s = timeout_s
@@ -85,8 +85,7 @@ class NominatimGeocoder:
                     response = await client.get(self.base_url, params={"q": query, "format": "jsonv2", "limit": 1,
                                                                          "addressdetails": 0, "email": self.contact},
                                                 headers={"Accept": "application/json",
-                                                         "User-Agent": (f"BloodSignal/1.0 (contact: {self.contact})"
-                                                                        if self.contact else "BloodSignal/1.0 (hospital directory geocoding)" )})
+                                                         "User-Agent": f"BloodSignal/1.0 (geocoding contact: {self.contact})"})
                 if response.status_code in (403, 429):
                     self._cooldown_until = self._clock() + self.cooldown_s
                     log.warning("Nominatim returned HTTP %s; geocoding cooling down", response.status_code)
