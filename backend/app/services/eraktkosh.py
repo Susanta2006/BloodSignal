@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
+from agents.geocorrect import GeoCorrectAgent
 from app.schemas import BloodBank, NormalizedStockRecord, utcnow
 from app.services.geocoding import NominatimGeocoder
 from app.services.stock_source import (
@@ -207,6 +208,9 @@ class ERaktKoshAdapter:
         self._geocoder = geocoder
         self._geocoder_candidate_limit = geocoder_candidate_limit
         self._geocoder_time_budget_s = geocoder_time_budget_s
+        
+        # Initialize the GeoCorrect Agent (Redis Cache + Rule-based + Gemini 3.5 Flash-Lite fallback)
+        self._geo_agent = GeoCorrectAgent()
 
     def configured(self) -> tuple[bool, str]:
         return True, "fixed read-only e-RaktKosh bulk endpoint configured; source access is verified per search"
@@ -263,32 +267,24 @@ class ERaktKoshAdapter:
                             count < self._geocoder_candidate_limit and _time.monotonic() < deadline):
                         count += 1
                         try:
-                            # Sanitize bank name and apply local overrides for reliable geocoding matching
-                            raw_bank_name = bank.name or ""
-                            cleaned_name = re.sub(r'DEPT OF.*?AND\s+', '', raw_bank_name, flags=re.IGNORECASE)
-                            cleaned_name = re.sub(r'\b(Prop|Pvt|Ltd|Healthcare|Hospital)\b', '', cleaned_name, flags=re.IGNORECASE)
-                            cleaned_name = re.sub(r'[,.\-_/&]+', ' ', cleaned_name).strip()
+                            # Delegate name cleaning and resolution to GeoCorrect Agent (Redis -> Rules -> Gemini 3.5 Flash-Lite)
+                            found = await self._geo_agent.resolve_location(
+                                name=bank.name,
+                                address=bank.address,
+                                district=district or bank.district,
+                                state=state,
+                                geocoder=self._geocoder
+                            )
                             
-                            if "GBP" in raw_bank_name.upper() or "AGMC" in raw_bank_name.upper():
-                                search_query = f"GBP Hospital {district or bank.district or 'Agartala'} {state or 'Tripura'}"
-                            elif "IGM" in raw_bank_name.upper() or "INDIRA GANDHI" in raw_bank_name.upper():
-                                search_query = f"Indira Gandhi Memorial Hospital {district or bank.district or 'Agartala'} {state or 'Tripura'}"
-                            else:
-                                search_query = f"{cleaned_name} {district or bank.district or ''} {state or ''}"
-
-                            found = await self._geocoder.geocode(
-                                name=search_query, address=bank.address, city=bank.city,
-                                district=district or bank.district, state=state,
-                                budget_s=max(0.0, deadline - _time.monotonic()))
                             if found:
                                 lat, lon, precision = found
                                 bank = bank.model_copy(update={
                                     "latitude": lat, "longitude": lon,
                                     "state": bank.state or state,
                                     "location_precision": precision,
-                                    "location_note": ("Approximate location geocoded from the facility address (town/district centre; © OpenStreetMap contributors). Distance is approximate, straight-line, not road distance."
+                                    "location_note": ("Approximate location geocoded via GeoCorrect Agent (town/district centre; © OpenStreetMap contributors). Distance is approximate, straight-line, not road distance."
                                                       if precision == "LOCALITY" else
-                                                       "Location geocoded from the facility address (© OpenStreetMap contributors). Distance is approximate, straight-line, not road distance.")})
+                                                       "Location geocoded via GeoCorrect Agent (© OpenStreetMap contributors). Distance is approximate, straight-line, not road distance.")})
                         except Exception as exc:
                             log.info("Non-fatal geocoding error: %s", type(exc).__name__)
                     updated_banks.append(bank)
