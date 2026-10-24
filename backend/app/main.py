@@ -62,6 +62,7 @@ def build_container(settings: Settings, *, stock: StockSourceAdapter | None = No
             clock=clock,
             geocoder=NominatimGeocoder(contact=settings.geocoder_contact,
                                        base_url=settings.geocoder_base_url,
+                                       application_url=settings.frontend_origin,
                                        enabled=settings.geocoder_enabled,
                                        timeout_s=settings.geocoder_timeout_s),
             geocoder_candidate_limit=settings.geocoder_candidate_limit,
