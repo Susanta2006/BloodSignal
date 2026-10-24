@@ -142,7 +142,7 @@ describe("blood bank map selection", () => {
     expect(params.get("q")).toContain("West Tripura");
     expect(screen.getByText(/not a confirmed pin/)).toBeInTheDocument();
     expect(
-      screen.getByText("Unavailable—coordinates missing or invalid"),
+      screen.getByText("Unavailable—facility coordinates not resolved"),
     ).toBeInTheDocument();
     // Directions without an origin start from the device's own current location.
     const link = screen.getByRole("link", {
@@ -182,7 +182,7 @@ describe("blood bank map selection", () => {
     expect(params.get("dirflg")).toBe("d");
     expect(screen.getByText("23.835700, 91.270000")).toBeInTheDocument();
     expect(
-      screen.getByText(/Facility coordinates are not on file, so the route goes/),
+      screen.getByText(/Facility coordinates could not be resolved yet, so the route goes/),
     ).toBeInTheDocument();
     const href = new URL(
       screen
@@ -233,6 +233,26 @@ describe("blood bank map selection", () => {
       "District Blood Centre, Hospital Road, Imphal, Manipur, India",
     );
     expect(params.get("daddr")).not.toBe("24.8,93.94");
-    expect(screen.getByText(/only a town\/district centre/)).toBeInTheDocument();
+    expect(screen.getByText(/geocoded from the facility address/)).toBeInTheDocument();
+  });
+
+  it("shows approximate straight-line distance and coordinates for a geocoded locality pin", () => {
+    render(
+      <BloodBankMap
+        facilities={[
+          {
+            id: "geocoded-bank",
+            name: "Geocoded Blood Centre",
+            address: "GB Bazar, Agartala, West Tripura, Tripura",
+            latitude: 23.8315,
+            longitude: 91.2868,
+            location_precision: "LOCALITY",
+          },
+        ]}
+        origin={{ latitude: 23.835774, longitude: 91.270078 }}
+      />,
+    );
+    expect(screen.getByText("23.831500, 91.286800 (approx.)")).toBeInTheDocument();
+    expect(screen.getByText(/^~\d+\.\d{2} km \(straight-line/)).toBeInTheDocument();
   });
 });

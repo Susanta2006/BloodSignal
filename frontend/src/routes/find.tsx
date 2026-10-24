@@ -284,11 +284,8 @@ function candidateDistanceKm(
   candidate: Candidate,
   origin: { latitude: number; longitude: number } | null,
 ): number | null {
-  if (
-    candidateLocationPrecision(candidate) === "LOCALITY" ||
-    (typeof candidate["distance_unavailable_reason"] === "string" &&
-      candidate["distance_unavailable_reason"].trim() !== "")
-  ) return null;
+  // Locality-level (geocoded) coordinates are allowed: the distance is shown as approximate.
+  // Prefer the backend's value, then fall back to the device origin + facility coordinates.
   const reported = candidate["distance_km"];
   if (typeof reported === "number" && Number.isFinite(reported) && reported >= 0) return reported;
   if (!origin) return null;
@@ -297,6 +294,27 @@ function candidateDistanceKm(
     getFacilityCoordinates(candidate),
     candidateLocationPrecision(candidate),
   );
+}
+
+/** Straight-line distance is always approximate; locality-level pins get a "~" prefix. */
+function formatDistance(km: number, candidate: Candidate): string {
+  const approximate = candidateLocationPrecision(candidate) === "LOCALITY";
+  return `${approximate ? "~" : ""}${km.toFixed(2)} km`;
+}
+
+/** Contact values for display. Hides obvious placeholder fax numbers (e.g. 1234567890). */
+function contactValues(candidate: Candidate, key: "emails" | "faxes", single: string): string[] {
+  const list = Array.isArray(candidate[key]) ? (candidate[key] as unknown[]) : [];
+  const values = [...list, candidate[single]]
+    .filter((v): v is string => typeof v === "string" && v.trim() !== "")
+    .map((v) => v.trim());
+  return [...new Set(values)].filter((v) => key !== "faxes" || !isPlaceholderNumber(v));
+}
+
+function isPlaceholderNumber(value: string): boolean {
+  const digits = value.replace(/\D/g, "");
+  if (digits.length < 6) return false;
+  return /^(\d)\1+$/.test(digits) || "01234567890123456789".includes(digits) || "9876543210987654321".includes(digits);
 }
 
 function componentLabel(value: string): string {
@@ -2148,11 +2166,11 @@ function BloodSearchPage() {
                               <td className="whitespace-nowrap px-3 py-4">
                                 {typeof distanceKm === "number" && Number.isFinite(distanceKm) ? (
                                   <>
-                                    <div className="font-medium">{distanceKm.toFixed(2)} km</div>
+                                    <div className="font-medium">{formatDistance(distanceKm, candidate)}</div>
                                     <div className="mt-1 text-xs text-muted-foreground">
                                       {candidateLocationPrecision(candidate) === "LOCALITY"
-                                        ? "Approx. straight-line from town centre"
-                                        : "Approx. straight-line, not road distance"}
+                                        ? "Approx. straight-line from geocoded address, not road distance"
+                                        : "Straight-line, not road distance"}
                                     </div>
                                   </>
                                 ) : (
@@ -2161,9 +2179,7 @@ function BloodSearchPage() {
                                     title={label(candidate["distance_unavailable_reason"])}
                                   >
                                     {sharedDeviceOrigin
-                                      ? candidateLocationPrecision(candidate) === "LOCALITY"
-                                        ? "Locality pin only; not used for facility distance"
-                                        : "Facility coordinates unavailable or ambiguous"
+                                      ? "Distance unavailable"
                                       : "Share device location to calculate distance"}
                                   </span>
                                 )}
@@ -2287,7 +2303,7 @@ function BloodSearchPage() {
                             <div><dt className="text-muted-foreground">Requested</dt><dd>{lastPayload ? `${lastPayload.blood_group} · ${componentLabel(lastPayload.component)} · ${lastPayload.quantity} ${lastPayload.quantity_unit}` : "Not available"}</dd></div>
                             <div><dt className="text-muted-foreground">Reported stock</dt><dd>{reportedGroup || "Group not stated"} · {reportedComponent ? componentLabel(reportedComponent) : "Component not stated"} · {typeof reportedQuantity === "number" ? `${reportedQuantity} ${reportedUnit || "units"}` : "Quantity not reported"}</dd></div>
                             <div><dt className="text-muted-foreground">Source updated</dt><dd>{sourceUpdate ? formatTime(sourceUpdate) : "Not reported"}</dd></div>
-                            <div><dt className="text-muted-foreground">Distance</dt><dd>{typeof distanceKm === "number" && Number.isFinite(distanceKm) ? `${distanceKm.toFixed(2)} km straight-line` : "Unavailable"}</dd></div>
+                            <div><dt className="text-muted-foreground">Distance</dt><dd>{typeof distanceKm === "number" && Number.isFinite(distanceKm) ? `${formatDistance(distanceKm, candidate)} straight-line` : "Unavailable"}</dd></div>
                           </dl>
                           {retrieved ? <p className="mt-2 text-xs text-muted-foreground">Fetched {formatTime(retrieved)}</p> : null}
                           <div className="mt-4 flex flex-wrap gap-2">
@@ -2526,8 +2542,9 @@ function BloodSearchPage() {
         const previewName = label(preview["bank_name"] ?? preview["name"]) || "Facility name unavailable";
         const previewAddress = label(preview["address"] ?? preview["formatted_address"]);
         const previewPhone = label(preview["phone"] ?? preview["phone_number"]);
-        const previewEmail = label(preview["email"] ?? preview["email_address"]);
-        const previewFax = label(preview["fax"] ?? preview["fax_number"]);
+        const previewEmails = contactValues(preview, "emails", "email");
+        const previewFaxes = contactValues(preview, "faxes", "fax");
+        const previewEmail = previewEmails[0];
         const previewSourceTime = label(preview["source_updated_at"] ?? previewStock["source_updated_at"] ?? preview["source_updated_at_raw"] ?? previewStock["source_updated_at_raw"]);
         const previewFetchedTime = label(preview["retrieved_at"] ?? preview["retrieval_time"]);
         const previewCity = label(preview["city"]);
@@ -2542,7 +2559,10 @@ function BloodSearchPage() {
         const previewDirections = previewLat !== null && previewLon !== null
           ? `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(`${previewLat},${previewLon}`)}`
           : `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(previewDestination)}`;
-        const previewContactRaw = label(preview["contact"] ?? preview["contact_details"] ?? preview["original_contact"]);
+        const previewFacilityType = label(preview["facility_type"] ?? preview["classification"] ?? preview["category"]);
+        const previewClassification = preview["source_type"] === "live" || preview["source"] === "eraktkosh" || preview["match_state"] === "MATCHED_REPORTED"
+          ? (previewFacilityType ? `Reported (${previewFacilityType})` : "Reported")
+          : (previewFacilityType ?? "Not reported");
         return (
           <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 p-0 sm:items-center sm:p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPreviewCandidate(null); }}>
             <section role="dialog" aria-modal="true" aria-labelledby="facility-preview-title" className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-t-xl border border-border bg-background p-5 shadow-xl sm:rounded-xl">
@@ -2555,7 +2575,7 @@ function BloodSearchPage() {
               </div>
               <dl className="mt-5 grid gap-4 text-sm sm:grid-cols-2">
                 <div><dt className="font-medium">Facility code / ID</dt><dd className="mt-1 break-words text-muted-foreground">{label(preview["bank_id"] ?? preview["facility_code"] ?? preview["candidate_id"] ?? preview["id"]) || "Not reported"}</dd></div>
-                <div><dt className="font-medium">Classification</dt><dd className="mt-1 text-muted-foreground">{label(preview["classification"] ?? preview["facility_type"] ?? preview["category"]) || "Not reported"}</dd></div>
+                <div><dt className="font-medium">Classification</dt><dd className="mt-1 text-muted-foreground">{previewClassification}</dd></div>
                 <div className="sm:col-span-2"><dt className="font-medium">Address</dt><dd className="mt-1 text-muted-foreground">{previewAddress || "Address not reported"}</dd></div>
                 <div><dt className="font-medium">Blood group reported</dt><dd className="mt-1 text-muted-foreground">{label(preview["blood_group_reported"] ?? previewStock["blood_group"]) || "Not reported"}</dd></div>
                 <div><dt className="font-medium">Component reported</dt><dd className="mt-1 text-muted-foreground">{componentLabel(label(preview["component_reported"] ?? previewStock["component"]) || "Unknown")}</dd></div>
@@ -2564,9 +2584,8 @@ function BloodSearchPage() {
                 <div><dt className="font-medium">Source updated</dt><dd className="mt-1 text-muted-foreground">{previewSourceTime ? formatTime(previewSourceTime) : "Not reported by source"}</dd></div>
                 <div><dt className="font-medium">Last checked by BloodSignal</dt><dd className="mt-1 text-muted-foreground">{previewFetchedTime ? formatTime(previewFetchedTime) : "Not available"}</dd></div>
                 <div><dt className="font-medium">Phone</dt><dd className="mt-1 text-muted-foreground">{previewPhone || "No phone reported"}</dd></div>
-                <div><dt className="font-medium">Email</dt><dd className="mt-1 break-words text-muted-foreground">{previewEmail || "No email reported"}</dd></div>
-                <div><dt className="font-medium">Fax (not callable)</dt><dd className="mt-1 text-muted-foreground">{previewFax || "No fax reported"}</dd></div>
-                <div className="sm:col-span-2"><dt className="font-medium">Original contact text</dt><dd className="mt-1 break-words text-muted-foreground">{previewContactRaw || "Original contact string not provided by source"}</dd></div>
+                <div><dt className="font-medium">Email</dt><dd className="mt-1 break-words text-muted-foreground">{previewEmails.length ? previewEmails.map((email, i) => (<span key={email}>{i ? ", " : ""}<a href={`mailto:${email}`} className="underline underline-offset-2">{email}</a></span>)) : "No email reported"}</dd></div>
+                <div><dt className="font-medium">Fax (not callable)</dt><dd className="mt-1 text-muted-foreground">{previewFaxes.length ? previewFaxes.join(", ") : "No fax reported"}</dd></div>
               </dl>
               {evidenceState(preview).warning ? <p className="mt-4 rounded-md border border-warning/40 bg-warning/10 p-3 text-sm">{evidenceState(preview).warning}</p> : null}
               <p className="mt-4 text-sm text-muted-foreground">Stock may change. Call the blood centre to confirm before travelling.</p>

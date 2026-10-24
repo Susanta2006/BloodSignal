@@ -146,9 +146,9 @@ export function BloodBankMap({
       </p>
       {selected.location_precision === "LOCALITY" ? (
         <p className="text-sm font-medium text-amber-700">
-          Coordinates on file are only a town/district centre, not the facility. The
-          straight-line distance shown is from your location to that centre, not to
-          the facility itself. Google Maps routing uses the facility name and address.
+          These coordinates were geocoded from the facility address and may be a
+          town or area centre rather than the exact building, so the straight-line
+          distance is approximate. Google Maps routing uses the facility name and address.
         </p>
       ) : null}
       {selected.location_note ? (
@@ -158,9 +158,9 @@ export function BloodBankMap({
       ) : null}
       {!hasCoordinates && showsTextRoute ? (
         <p className="text-sm font-medium text-amber-700">
-          Facility coordinates are not on file, so the route goes to the facility
-          by its name and address as Google Maps resolves them. Check the
-          destination before travelling; straight-line distance is unavailable.
+          Facility coordinates could not be resolved yet, so the route goes to the
+          facility by its name and address as Google Maps resolves them. Check the
+          destination before travelling.
         </p>
       ) : null}
       {!hasCoordinates && !showsTextRoute ? (
@@ -195,7 +195,7 @@ export function BloodBankMap({
           <dt className="font-medium text-foreground">Facility coordinates</dt>
           <dd>
             {hasCoordinates
-              ? `${selected.latitude!.toFixed(6)}, ${selected.longitude!.toFixed(6)}`
+              ? `${selected.latitude!.toFixed(6)}, ${selected.longitude!.toFixed(6)}${selected.location_precision === "LOCALITY" ? " (approx.)" : ""}`
               : "Not available"}
           </dd>
         </div>
@@ -220,9 +220,11 @@ export function BloodBankMap({
             Straight-line distance
           </dt>
           <dd>
-            {straightLineKm === null
-              ? "Unavailable—coordinates missing or invalid"
-              : `${straightLineKm.toFixed(2)} km (straight-line, not road distance)`}
+            {straightLineKm !== null
+              ? `${selected.location_precision === "LOCALITY" ? "~" : ""}${straightLineKm.toFixed(2)} km (straight-line, not road distance)`
+              : !hasCoordinates
+                ? "Unavailable—facility coordinates not resolved"
+                : "Share device location to calculate distance"}
           </dd>
         </div>
       </dl>

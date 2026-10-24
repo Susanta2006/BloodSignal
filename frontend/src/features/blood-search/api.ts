@@ -205,6 +205,19 @@ function firstDefined(...values: unknown[]): unknown {
   return values.find((value) => value !== undefined && value !== null);
 }
 
+/** First non-empty source among arrays/strings, flattened to unique trimmed strings. */
+function stringList(...sources: unknown[]): string[] {
+  const out: string[] = [];
+  for (const source of sources) {
+    const items = Array.isArray(source) ? source : [source];
+    for (const item of items) {
+      if (typeof item === "string" && item.trim() && !out.includes(item.trim())) out.push(item.trim());
+    }
+    if (out.length) break;
+  }
+  return out;
+}
+
 function facilityCoordinate(
   candidate: Record<string, unknown>,
   bank: Record<string, unknown>,
@@ -301,6 +314,11 @@ export async function getCandidates(runId: string): Promise<Candidate[]> {
       state: firstDefined(bank["state"], candidate["state"]),
       facility_source_type: bank["source_type"],
       phone: firstDefined(bank["phone"], candidate["phone"]),
+      emails: stringList(bank["emails"], bank["email"], candidate["emails"], candidate["email"]),
+      faxes: stringList(bank["faxes"], bank["fax"], candidate["faxes"], candidate["fax"]),
+      email: stringList(bank["emails"], bank["email"], candidate["emails"], candidate["email"])[0],
+      fax: stringList(bank["faxes"], bank["fax"], candidate["faxes"], candidate["fax"])[0],
+      facility_type: firstDefined(bank["facility_type"], bank["type"], candidate["facility_type"]),
       latitude: facilityCoordinate(candidate, bank, "latitude"),
       longitude: facilityCoordinate(candidate, bank, "longitude"),
       location_precision: firstDefined(bank["location_precision"], candidate["location_precision"]),
