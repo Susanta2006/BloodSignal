@@ -54,12 +54,12 @@ def build_container(settings: Settings, *, stock: StockSourceAdapter | None = No
     maps_key = settings.google_maps_server_key.get_secret_value()
     # Demo and live are separate code paths. Live mode never touches demo fixtures.
     if stock is None:
-        redis_client = None
-        if settings.geocoder_redis_url:
-           try:
-               redis_client = redis.from_url(settings.geocoder_redis_url, decode_responses=True)
-            except Exception as exc:
-                log.warning("Redis connection failed: %s; geocoding will use in-memory cache only", type(exc).__name__)
+       redis_client = None
+       if settings.geocoder_redis_url:
+         try:
+           redis_client = redis.from_url(settings.geocoder_redis_url, decode_responses=True)
+         except Exception as exc:
+           log.warning("Redis connection failed: %s; geocoding will use in-memory cache only", type(exc).__name__)
         stock = (DemoStockAdapter(clock) if not live else ERaktKoshAdapter(
             timeout_s=settings.stock_source_timeout_s,
             source_timezone=settings.eraktkosh_source_timezone or "Asia/Kolkata",
@@ -75,8 +75,7 @@ def build_container(settings: Settings, *, stock: StockSourceAdapter | None = No
                 application_url=settings.frontend_origin,
                 enabled=settings.geocoder_enabled,
                 timeout_s=settings.geocoder_timeout_s,
-                redis_client=redis_client,
-            ),
+                redis_client=redis_client,),
             geocoder_candidate_limit=settings.geocoder_candidate_limit,
             geocoder_time_budget_s=settings.geocoder_time_budget_s))
     if directory is None:
