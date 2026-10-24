@@ -70,7 +70,6 @@ def build_container(settings: Settings, *, stock: StockSourceAdapter | None = No
                 relay_url=settings.eraktkosh_relay_url,
                 relay_secret=settings.eraktkosh_relay_secret.get_secret_value(),
                 clock=clock,
-                redis_client=redis_client,
                 geocoder=NominatimGeocoder(
                     contact=settings.geocoder_contact,
                     base_url=settings.geocoder_base_url,
