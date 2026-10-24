@@ -7,6 +7,7 @@ import {
 import {
   buildDirectionsUrl,
   buildGoogleMapsEmbedUrl,
+  buildGoogleMapsSearchEmbedUrl,
   type TravelMode,
 } from "@/features/blood-search/directions";
 
@@ -14,8 +15,11 @@ export type FacilityMapItem = {
   id: string;
   name: string;
   address?: string;
-  latitude: number;
-  longitude: number;
+  city?: string;
+  district?: string;
+  state?: string;
+  latitude?: number | null;
+  longitude?: number | null;
   location_precision?: "FACILITY" | "LOCALITY" | null;
   location_note?: string | null;
 };
@@ -44,13 +48,9 @@ export function BloodBankMap({
   travelMode = "driving",
 }: Props) {
   const validFacilities = useMemo(() => {
-    return facilities.filter((facility) => {
-      return Boolean(
-        facility.id &&
-        facility.name.trim() &&
-        validCoordinates(facility.latitude, facility.longitude),
-      );
-    });
+    // Keep named results selectable even when the backend has no verified pin yet.
+    // Those entries get a Google Maps name/address search preview, never a guessed pin.
+    return facilities.filter((facility) => Boolean(facility.id && facility.name.trim()));
   }, [facilities]);
   const [selectedId, setSelectedId] = useState<string>(
     validFacilities[0]?.id ?? "",
@@ -69,38 +69,38 @@ export function BloodBankMap({
   if (validFacilities.length === 0 || !selected) {
     return (
       <p className="border-y py-6 text-sm text-muted-foreground">
-        No facilities in these results have validated coordinates. The facility
-        list remains available; no location has been guessed.
+        No named facilities are available to preview on the map. The facility list
+        remains available; no location has been guessed.
       </p>
     );
   }
 
-  const lat = selected.latitude;
-  const lon = selected.longitude;
-  const destination = { ...selected, latitude: lat, longitude: lon };
-  const embedUrl = buildGoogleMapsEmbedUrl(
-    destination,
-    origin,
-    originLabel,
-    travelMode,
-  );
+  const hasCoordinates = validCoordinates(selected.latitude ?? NaN, selected.longitude ?? NaN);
+  const destination = { ...selected };
+  const embedUrl = hasCoordinates
+    ? buildGoogleMapsEmbedUrl(destination, origin, originLabel, travelMode)
+    : buildGoogleMapsSearchEmbedUrl(destination);
   const googleMapsUrl = buildDirectionsUrl(
     destination,
     travelMode,
-    validLatLon(origin)
-      ? `${origin.latitude},${origin.longitude}`
-      : (originLabel ?? undefined),
+    hasCoordinates
+      ? validLatLon(origin)
+        ? `${origin.latitude},${origin.longitude}`
+        : (originLabel ?? undefined)
+      : undefined,
   );
-  const straightLineKm = facilityDistanceKm(
-    origin,
-    { latitude: lat, longitude: lon },
-    selected.location_precision,
-  );
+  const straightLineKm = hasCoordinates
+    ? facilityDistanceKm(
+        origin,
+        { latitude: selected.latitude!, longitude: selected.longitude! },
+        selected.location_precision,
+      )
+    : null;
 
   return (
     <div className="space-y-3">
       <label htmlFor="google-facility" className="block text-sm font-medium">
-        Show facility and route on Google Maps
+        Select a facility to preview on Google Maps
       </label>
       <select
         id="google-facility"
@@ -118,7 +118,11 @@ export function BloodBankMap({
         {embedUrl ? (
           <iframe
             key={embedUrl}
-            title={`Google Maps route to ${selected.name}`}
+            title={
+              hasCoordinates
+                ? `Google Maps route to ${selected.name}`
+                : `Google Maps search for ${selected.name}`
+            }
             src={embedUrl}
             className="h-full w-full border-0"
             loading="lazy"
@@ -140,23 +144,36 @@ export function BloodBankMap({
           {selected.location_note}
         </p>
       ) : null}
+      {!hasCoordinates ? (
+        <p className="text-sm font-medium text-amber-700">
+          Facility coordinates are not verified. This is a name-and-area search
+          preview, not a confirmed pin; distance and route are unavailable until
+          the search service returns facility-level coordinates.
+        </p>
+      ) : null}
       <p className="text-xs leading-5 text-muted-foreground">
-        {validLatLon(origin)
+        {!hasCoordinates
+          ? "Google Maps is searching by facility name and address. Check the result before travelling; this preview does not confirm the exact facility location."
+          : validLatLon(origin)
           ? "The map shows your shared device location and the selected facility. Open directions for Google Maps' current route options."
           : originLabel
             ? `Google Maps directions start from ${originLabel}. This is a district-level starting area, not your precise location.`
             : "The map shows the facility at its source coordinates. Share device location to show a route from your current location."}{" "}
-        Map imagery and routing are provided by Google Maps; straight-line
-        distance is not road distance or travel time.
+        {hasCoordinates
+          ? "Map imagery and routing are provided by Google Maps."
+          : "Map search results are provided by Google Maps."}{" "}
+        Straight-line distance is not road distance or travel time.
       </p>
       <dl className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
         <div>
           <dt className="font-medium text-foreground">Facility coordinates</dt>
           <dd>
-            {lat.toFixed(6)}, {lon.toFixed(6)}
+            {hasCoordinates
+              ? `${selected.latitude!.toFixed(6)}, ${selected.longitude!.toFixed(6)}`
+              : "Not available"}
           </dd>
         </div>
-        {validLatLon(origin) ? (
+        {hasCoordinates && validLatLon(origin) ? (
           <div>
             <dt className="font-medium text-foreground">
               Your shared location
@@ -166,7 +183,7 @@ export function BloodBankMap({
             </dd>
           </div>
         ) : null}
-        {!validLatLon(origin) && originLabel ? (
+        {hasCoordinates && !validLatLon(origin) && originLabel ? (
           <div>
             <dt className="font-medium text-foreground">Starting area</dt>
             <dd>{originLabel}</dd>
@@ -178,7 +195,9 @@ export function BloodBankMap({
           </dt>
           <dd>
             {straightLineKm === null
-              ? "Unavailable from locality or ambiguous coordinates"
+              ? hasCoordinates
+                ? "Unavailable from locality or ambiguous coordinates"
+                : "Unavailable until facility coordinates are verified"
               : `${straightLineKm.toFixed(2)} km`}
           </dd>
         </div>
@@ -190,7 +209,9 @@ export function BloodBankMap({
           target="_blank"
           rel="noreferrer"
         >
-          Open {travelMode} directions in Google Maps
+          {hasCoordinates
+            ? `Open ${travelMode} directions in Google Maps`
+            : "Search this facility in Google Maps"}
         </a>
       ) : null}
     </div>

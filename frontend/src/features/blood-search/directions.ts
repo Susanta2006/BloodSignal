@@ -47,6 +47,27 @@ export function buildGoogleMapsEmbedUrl(
   return `https://maps.google.com/maps?${params.toString()}`;
 }
 
+/** Search fallback for a named facility without verified coordinates; it is not a pin or route. */
+export function buildGoogleMapsSearchEmbedUrl(
+  facility: FacilityDestination,
+): string | null {
+  const parts = [
+    facility.name,
+    facility.address,
+    facility.city,
+    facility.district,
+    facility.state,
+    "India",
+  ]
+    .filter(usableText)
+    .map((value) => value.trim())
+    .filter((value, index, all) => all.indexOf(value) === index);
+
+  if (parts.length === 0) return null;
+  const params = new URLSearchParams({ q: parts.join(", "), output: "embed" });
+  return `https://maps.google.com/maps?${params.toString()}`;
+}
+
 const INVALID_VALUES = new Set([
   "unknown",
   "unavailable",

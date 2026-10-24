@@ -134,4 +134,41 @@ describe("search API integration", () => {
 
     expect(candidate?.["driving_distance"]).toBeUndefined();
   });
+
+  it("preserves root coordinates and reads coordinates nested under the facility location", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      Response.json({
+        candidates: [
+          {
+            candidate_id: "root-coordinate-candidate",
+            latitude: "23.81",
+            longitude: "91.27",
+            bank: { bank_id: "bank-1", name: "Root Coordinate Hospital" },
+          },
+          {
+            candidate_id: "nested-coordinate-candidate",
+            bank: {
+              bank_id: "bank-2",
+              name: "Nested Coordinate Hospital",
+              location: { latitude: 23.82, longitude: 91.28 },
+            },
+          },
+        ],
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const candidates = await getCandidates("run-1");
+
+    expect(candidates[0]).toMatchObject({
+      name: "Root Coordinate Hospital",
+      latitude: "23.81",
+      longitude: "91.27",
+    });
+    expect(candidates[1]).toMatchObject({
+      name: "Nested Coordinate Hospital",
+      latitude: 23.82,
+      longitude: 91.28,
+    });
+  });
 });

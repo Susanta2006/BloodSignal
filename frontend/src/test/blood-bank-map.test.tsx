@@ -35,7 +35,7 @@ describe("blood bank map selection", () => {
     expect(new URL(map.src).searchParams.get("daddr")).toBe("24.8,93.9");
 
     fireEvent.change(
-      screen.getByLabelText("Show facility and route on Google Maps"),
+      screen.getByLabelText("Select a facility to preview on Google Maps"),
       {
         target: { value: "bank-b" },
       },
@@ -58,7 +58,7 @@ describe("blood bank map selection", () => {
       />,
     );
     fireEvent.change(
-      screen.getByLabelText("Show facility and route on Google Maps"),
+      screen.getByLabelText("Select a facility to preview on Google Maps"),
       {
         target: { value: "bank-b" },
       },
@@ -115,5 +115,38 @@ describe("blood bank map selection", () => {
 
     expect(screen.getByRole("option", { name: "Bank A" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Bank B" })).toBeInTheDocument();
+  });
+
+  it("shows a facility search preview when coordinates are not available", () => {
+    render(
+      <BloodBankMap
+        facilities={[
+          {
+            id: "unlocated-bank",
+            name: "AGMC & GBP Hospital",
+            address: "GB Bazar, P.O Kunjavan",
+            city: "Agartala",
+            district: "West Tripura",
+            state: "Tripura",
+          },
+        ]}
+        origin={{ latitude: 23.8357, longitude: 91.27 }}
+      />,
+    );
+
+    const map = screen.getByTitle(
+      "Google Maps search for AGMC & GBP Hospital",
+    ) as HTMLIFrameElement;
+    const params = new URL(map.src).searchParams;
+    expect(params.get("q")).toContain("AGMC & GBP Hospital");
+    expect(params.get("q")).toContain("West Tripura");
+    expect(params.get("q")).toContain("Tripura");
+    expect(screen.getByText(/not a confirmed pin/)).toBeInTheDocument();
+    expect(
+      screen.getByText("Unavailable until facility coordinates are verified"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Search this facility in Google Maps" }),
+    ).toBeInTheDocument();
   });
 });

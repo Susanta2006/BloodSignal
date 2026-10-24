@@ -201,6 +201,37 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function firstDefined(...values: unknown[]): unknown {
+  return values.find((value) => value !== undefined && value !== null);
+}
+
+function facilityCoordinate(
+  candidate: Record<string, unknown>,
+  bank: Record<string, unknown>,
+  axis: "latitude" | "longitude",
+): unknown {
+  const keys =
+    axis === "latitude" ? ["latitude", "lat"] : ["longitude", "lng", "lon"];
+  const candidateLocation = asRecord(candidate["location"]);
+  const bankLocation = asRecord(bank["location"]);
+  const candidateCoordinates = asRecord(candidate["coordinates"]);
+  const bankCoordinates = asRecord(bank["coordinates"]);
+  const candidateLocationCoordinates = asRecord(candidateLocation["coordinates"]);
+  const bankLocationCoordinates = asRecord(bankLocation["coordinates"]);
+  const records = [
+    bank,
+    bankLocation,
+    bankCoordinates,
+    bankLocationCoordinates,
+    candidate,
+    candidateLocation,
+    candidateCoordinates,
+    candidateLocationCoordinates,
+  ];
+
+  return firstDefined(...records.flatMap((record) => keys.map((key) => record[key])));
+}
+
 function parseRun(body: unknown, fallbackRunId?: string): RunSummary {
   const value = asRecord(body);
   const runId = identifier.safeParse(value["run_id"] ?? fallbackRunId);
@@ -263,17 +294,17 @@ export async function getCandidates(runId: string): Promise<Candidate[]> {
     return {
       ...candidate,
       bank_id: bank["bank_id"],
-      name: bank["name"],
-      address: bank["address"],
-      city: bank["city"],
-      district: bank["district"],
-      state: bank["state"],
+      name: firstDefined(bank["name"], candidate["bank_name"], candidate["name"]),
+      address: firstDefined(bank["address"], candidate["address"], candidate["formatted_address"]),
+      city: firstDefined(bank["city"], candidate["city"]),
+      district: firstDefined(bank["district"], candidate["district"]),
+      state: firstDefined(bank["state"], candidate["state"]),
       facility_source_type: bank["source_type"],
-      phone: bank["phone"],
-      latitude: bank["latitude"],
-      longitude: bank["longitude"],
-      location_precision: bank["location_precision"],
-      location_note: bank["location_note"],
+      phone: firstDefined(bank["phone"], candidate["phone"]),
+      latitude: facilityCoordinate(candidate, bank, "latitude"),
+      longitude: facilityCoordinate(candidate, bank, "longitude"),
+      location_precision: firstDefined(bank["location_precision"], candidate["location_precision"]),
+      location_note: firstDefined(bank["location_note"], candidate["location_note"]),
       directory_source: bank["directory_source"],
       directory_reference: bank["directory_reference"],
       directory_retrieved_at: bank["directory_retrieved_at"],
