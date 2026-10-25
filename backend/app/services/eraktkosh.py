@@ -350,7 +350,18 @@ class ERaktKoshAdapter:
         }
         headers = {"Accept": "application/json", "User-Agent": "BloodSignal/1.0 (read-only hackathon availability search)"}
         target = NEAREST_URL
-        # The relay only supports the stock endpoint; nearest is always called directly.
+        # Reuse the configured relay and shared secret for nearest-coordinate lookups.
+        # ERAKTKOSH_RELAY_URL is normally .../api/stock; its sibling route is /api/nearest.
+        if self._relay_url:
+            from urllib.parse import urlsplit, urlunsplit
+            parts = urlsplit(self._relay_url)
+            path = parts.path.rstrip("/")
+            if path.endswith("/stock"):
+                path = path[:-len("/stock")] + "/nearest"
+            else:
+                path = path + "/nearest"
+            target = urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+            headers["X-Relay-Secret"] = self._relay_secret
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(self._timeout, connect=15.0),
                                           transport=self._transport, follow_redirects=False) as client:
