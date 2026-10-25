@@ -242,20 +242,20 @@ class ERaktKoshAdapter:
                 banks = result.banks
 
             # Enrich coordinates only for facilities e-RaktKosh reports as nearest to the
-            # device origin (radius 3000 m). No geocoding/geocorrection is performed.
+            # device origin (radius 200 km). No geocoding/geocorrection is performed.
             if origin is not None and banks:
                 try:
                     olat, olon = origin
-                    nearest = await self._fetch_nearest_bloodbanks(float(olat), float(olon), 3000)
+                    nearest = await self._fetch_nearest_bloodbanks(float(olat), float(olon), 200000)
                 except Exception as exc:
                     log.info("Non-fatal nearest-bloodbank lookup error: %s", type(exc).__name__)
                     nearest = {}
                 if nearest:
-                    kept_ids = set()
                     updated_banks = []
                     for bank in banks:
-                        info = nearest.get(str(bank.bank_id))
+                        info = nearest.get(str(bank.bank_id).removeprefix("eraktkosh-"))
                         if info is None:
+                            updated_banks.append(bank)
                             continue
                         try:
                             lat = float(info.get("latitude")) if info.get("latitude") is not None else None
@@ -267,7 +267,7 @@ class ERaktKoshAdapter:
                             "longitude": lon if lon is not None else bank.longitude,
                             "location_precision": "FACILITY",
                             "location_note": ("Location from e-RaktKosh nearest-bloodbank API "
-                                              "(device origin, 3 km radius)."),
+                                              "(device origin, 200 km radius)."),
                         })
                         dist = info.get("distance")
                         if dist is not None:
@@ -276,10 +276,7 @@ class ERaktKoshAdapter:
                             except (TypeError, ValueError):
                                 pass
                         updated_banks.append(bank)
-                        kept_ids.add(str(bank.bank_id))
-                    if updated_banks:
-                        banks = updated_banks
-                        selected = [r for r in selected if str(r.bank_source_id) in kept_ids]
+                    banks = updated_banks
             return result.model_copy(update={"records": selected, "banks": banks,
                                              "checked_bank_ids": [b.bank_id for b in banks]})
         finally:
