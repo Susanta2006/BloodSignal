@@ -92,6 +92,21 @@ def _clean(value: Any) -> str | None:
     return None
 
 
+def _hospital_code_key(value: Any) -> str | None:
+    """Normalize an e-RaktKosh hospital/bank code for nearest-endpoint merging.
+
+    Stock bank_ids are prefixed (e.g. ``eraktkosh-25001``) while the nearest
+    endpoint returns a bare ``hospitalCode`` (e.g. ``25001``). Strip the prefix
+    and any surrounding whitespace so both sides compare on the trailing code.
+    """
+    text = _clean(value)
+    if text is None:
+        return None
+    if "-" in text:
+        text = text.rsplit("-", 1)[-1].strip()
+    return text or None
+
+
 def _map_group(raw: str) -> tuple[str | None, str]:
     k = re.sub(r"\s+", "", raw.casefold()).replace("+ve", "+ve").replace("-ve", "-ve")
     if k in _GROUPS:
@@ -242,19 +257,23 @@ class ERaktKoshAdapter:
                 banks = result.banks
 
             # Enrich coordinates only for facilities e-RaktKosh reports as nearest to the
-            # device origin (radius 200 km). No geocoding/geocorrection is performed.
+            # device origin (radius 1000 km). No geocoding/geocorrection is performed.
             if origin is not None and banks:
                 try:
                     olat, olon = origin
-                    nearest = await self._fetch_nearest_bloodbanks(float(olat), float(olon), 200000)
+                    nearest = await self._fetch_nearest_bloodbanks(float(olat), float(olon), 1000000)
                 except Exception as exc:
                     log.info("Non-fatal nearest-bloodbank lookup error: %s", type(exc).__name__)
                     nearest = {}
                 if nearest:
                     updated_banks = []
                     for bank in banks:
-                        info = nearest.get(str(bank.bank_id).removeprefix("eraktkosh-"))
+                        key = _hospital_code_key(bank.bank_id)
+                        info = nearest.get(key) if key is not None else None
                         if info is None:
+                            info = nearest.get(str(bank.bank_id))
+                        if info is None:
+                            log.debug("No nearest-endpoint match for bank %s (key=%s)", bank.bank_id, key)
                             updated_banks.append(bank)
                             continue
                         try:
@@ -267,7 +286,7 @@ class ERaktKoshAdapter:
                             "longitude": lon if lon is not None else bank.longitude,
                             "location_precision": "FACILITY",
                             "location_note": ("Location from e-RaktKosh nearest-bloodbank API "
-                                              "(device origin, 200 km radius)."),
+                                              "(device origin, 1000 km radius)."),
                         })
                         dist = info.get("distance")
                         if dist is not None:
@@ -323,6 +342,9 @@ class ERaktKoshAdapter:
             if code is None:
                 continue
             code = str(code)
+            key = _hospital_code_key(code)
+            if key is None:
+                continue
             try:
                 dist = float(row.get("dist"))
             except (TypeError, ValueError):
@@ -339,7 +361,7 @@ class ERaktKoshAdapter:
                 lon = float(row.get("longitude"))
             except (TypeError, ValueError):
                 lon = None
-            result[code] = {
+            result[key] = {
                 "distance": dist,
                 "latitude": lat,
                 "longitude": lon,
