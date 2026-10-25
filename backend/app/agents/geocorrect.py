@@ -82,11 +82,15 @@ class GeoCorrectAgent:
         if not name:
             return ""
 
+        # Remove parentheses contents like "(Non- Govt.)" FIRST so the
+        # hospital-name pattern below can match across the full name.
+        cleaned = re.sub(r'\([^)]*\)', '', name)
+
         # Remove common institutional suffixes
         cleaned = re.sub(
             r'\b(survey|plot|door|room|floor|block|phase|ward|near|opp|opposite|behind|'
             r'prop|pvt|ltd|limited|healthcare|trust|society|co-op|dept)\b.*$',
-            '', name, flags=re.IGNORECASE
+            '', cleaned, flags=re.IGNORECASE
         )
 
         # Try to extract hospital/medical facility name patterns
