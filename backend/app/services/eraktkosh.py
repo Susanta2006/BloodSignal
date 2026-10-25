@@ -1,3 +1,5 @@
+"""ERaktKosh bulk endpoint adapter with geocoding support."""
+
 from __future__ import annotations
 
 import asyncio
@@ -191,7 +193,8 @@ class ERaktKoshAdapter:
                  sleep: Callable[[float], Any] = asyncio.sleep,
                  geocoder: NominatimGeocoder | None = None, geocoder_candidate_limit: int = 10,
                  geocoder_time_budget_s: float = 3.0,
-                 relay_url: str = "", relay_secret: str = ""):
+                 relay_url: str = "", relay_secret: str = "",
+                 redis_client: Any = None):
         self._base = OFFICIAL_URL
         self._relay_url = relay_url.strip()
         self._relay_secret = relay_secret
@@ -208,9 +211,10 @@ class ERaktKoshAdapter:
         self._geocoder = geocoder
         self._geocoder_candidate_limit = geocoder_candidate_limit
         self._geocoder_time_budget_s = geocoder_time_budget_s
-        
+
         # Initialize the GeoCorrect Agent (Redis Cache + Rule-based + Gemini 3.5 Flash-Lite fallback)
-        self._geo_agent = GeoCorrectAgent()
+        # Pass the shared Redis client so geocoding cache is shared across processes
+        self._geo_agent = GeoCorrectAgent(redis_client=redis_client)
 
     def configured(self) -> tuple[bool, str]:
         return True, "fixed read-only e-RaktKosh bulk endpoint configured; source access is verified per search"
@@ -275,7 +279,7 @@ class ERaktKoshAdapter:
                                 state=state,
                                 geocoder=self._geocoder
                             )
-                            
+
                             if found:
                                 lat, lon, precision = found
                                 bank = bank.model_copy(update={
@@ -307,15 +311,14 @@ class ERaktKoshAdapter:
         if remaining > 0:
             raise SourceRateLimited(f"e-RaktKosh retry window active; wait about {int(remaining) + 1}s")
         try:
-            async with self._semaphore:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(self._timeout, connect=15.0),
-                                             transport=self._transport, follow_redirects=False) as client:
-                    response = await client.get(target, params=params, headers=headers)
+            async with httpx.AsyncClient(timeout=httpx.Timeout(self._timeout, connect=15.0),
+                                         transport=self._transport, follow_redirects=False) as client:
+                response = await client.get(target, params=params, headers=headers)
         except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
             log.warning("e-RaktKosh request failed: error_type=%s state_code=%s component_id=%s", type(exc).__name__, state_code, component_id)
             raise SourceUnavailable(type(exc).__name__) from exc
         except httpx.HTTPError as exc:
-            log.warning("e-RaktKosh HTTP client error: error_type=%s state_code=%s component_id=%s", type(exc).__name__, state_code, component_id)
+            log.warning("e-Raktkosh HTTP client error: error_type=%s state_code=%s component_id=%s", type(exc).__name__, state_code, component_id)
             raise SourceUnavailable(type(exc).__name__) from exc
 
         status = response.status_code

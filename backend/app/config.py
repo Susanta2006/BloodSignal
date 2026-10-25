@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     # Geocoding via Vercel relay (address-first Nominatim queries)
     geocoder_relay_url: str = ""
     geocoder_relay_secret: SecretStr = SecretStr("")
-    
+
     # Redis connection for geocoding cache (per-facility, 24h TTL)
     geocoder_redis_url: str = ""
 
