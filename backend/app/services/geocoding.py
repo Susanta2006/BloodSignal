@@ -353,19 +353,40 @@ class NominatimGeocoder:
         )
 
     @staticmethod
-    def _matches_region(result: dict[str, Any], district: str | None, state: str | None) -> bool:
-        address = result.get("address")
-        if not isinstance(address, dict):
-            return not district and not state
-        if state and not _matches_area(state, [
-            address.get("state"), address.get("state_district"),
-        ]):
-            return False
-        if district and not _matches_area(district, [
-            address.get(field) for field in _LOCALITY_ADDRESS_FIELDS
-        ]):
-            return False
-        return True
+    def _matches_facility_name(result: dict[str, Any], expected_name: str) -> bool:
+        """Check if Nominatim result matches the expected facility name.
+
+        Used by tests to verify name matching logic.
+        """
+        result_name = result.get("name", "")
+        result_display = result.get("display_name", "")
+        expected_tokens = _tokens(expected_name)
+        if not expected_tokens:
+            return True
+        # Check both name and display_name fields
+        for field_value in (result_name, result_display):
+            if isinstance(field_value, str):
+                if expected_tokens <= _tokens(field_value):
+                    return True
+        return False
+
+    @staticmethod
+    def _matches_facility_name(result: dict[str, Any], expected_name: str) -> bool:
+        """Check if Nominatim result matches the expected facility name.
+
+        Used by tests to verify name matching logic.
+        """
+        result_name = result.get("name", "")
+        result_display = result.get("display_name", "")
+        expected_tokens = _tokens(expected_name)
+        if not expected_tokens:
+            return True
+        # Check both name and display_name fields
+        for field_value in (result_name, result_display):
+            if isinstance(field_value, str):
+                if expected_tokens <= _tokens(field_value):
+                    return True
+        return False
 
     async def _lookup(
         self, query: str, deadline: float
