@@ -1,4 +1,4 @@
 {
   "regions": ["bom1"],
-  "functions": { "api/stock.js": { "maxDuration": 30 } }
+  "functions": { "api/stock.js": { "maxDuration": 30 }, "api/nearest.js": { "maxDuration": 30 } }
 }

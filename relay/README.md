@@ -15,6 +15,10 @@ Your backend keeps all its logic (parsing, freshness, SOURCE_UNAVAILABLE handlin
 ```bash
 curl -i -H "x-relay-secret: YOUR_SECRET" \
   "https://bloodsignal-relay.vercel.app/api/stock?stateCode=16&componentId=12"
+
+# Coordinate lookup route (also secret-protected)
+curl -i -H "x-relay-secret: YOUR_SECRET" \
+  "https://bloodsignal-relay.vercel.app/api/nearest?latitude=20.5937&longitude=78.9629&radius=2000000"
 ```
 - `200` + header `x-relay-region: bom1` + a JSON list: it works. Continue.
 - `504` / `403` / timeout: Mumbai datacenter addresses are also blocked or filtered. Stop here

@@ -31,3 +31,20 @@ const ok = { method: "GET", url: "/api/stock?stateCode=16&componentId=12", heade
   assert.equal(t.status, 504);
   console.log("relay tests passed");
 })();
+
+// Verify the nearest endpoint is secret-protected and only targets the fixed upstream.
+const nearestHandler = require("./api/nearest.js");
+function callNearest(req, fetchImpl) {
+  return new Promise((resolve) => { const res = { headers: {}, setHeader(k,v){this.headers[k]=v;}, end(b){resolve({status:this.statusCode,body:b,headers:this.headers});} }; nearestHandler(req,res,fetchImpl); });
+}
+(async () => {
+  const base = { method: "GET", url: "/api/nearest?latitude=20.5937&longitude=78.9629&radius=2000000", headers: { "x-relay-secret": process.env.RELAY_SECRET } };
+  assert.equal((await callNearest({ ...base, headers: {} })).status, 401);
+  assert.equal((await callNearest({ ...base, url: "/api/nearest?latitude=999&longitude=78&radius=2000000" })).status, 400);
+  let seen;
+  const good = await callNearest(base, async (u) => { seen=String(u); return new Response('[{"hospitalCode":"25001","latitude":24.8,"longitude":93.9,"dist":1200}]', {status:200}); });
+  assert.equal(good.status, 200);
+  assert.ok(seen.startsWith("https://eraktkosh.mohfw.gov.in/eraktkoshPortal/eraktkosh/bloodbank/nearest?"));
+  assert.ok(seen.includes("latitude=20.5937") && seen.includes("radius=2000000"));
+  console.log("nearest relay tests passed");
+})();
