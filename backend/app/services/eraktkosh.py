@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -30,7 +31,29 @@ log = logging.getLogger("eraktkosh")
 ERAKTKOSH_SOURCE_ID = "eraktkosh"
 ERAKTKOSH_LABEL = "e-RaktKosh"
 OFFICIAL_URL = "https://eraktkosh.mohfw.gov.in/eraktkoshPortal/eraktkosh/blood-availability"
+NEAREST_URL = "https://eraktkosh.mohfw.gov.in/eraktkoshPortal/eraktkosh/bloodbank/nearest"
+NEAREST_DEFAULT_RADIUS_M = 3000
+NATIONWIDE_COORDINATE_RADIUS_M = 2000000
 PARSER_VERSION = "eraktkosh-bulk-json-1"
+
+
+class _RedactCoordinateQueryFilter(logging.Filter):
+    """Keep device GPS out of httpx's request-URL info logs."""
+
+    _pattern = re.compile(r"(?i)([?&](?:latitude|longitude)=)[^&\s\"']+")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = self._pattern.sub(r"\1<redacted>", message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
+_httpx_logger = logging.getLogger("httpx")
+if not any(isinstance(item, _RedactCoordinateQueryFilter) for item in _httpx_logger.filters):
+    _httpx_logger.addFilter(_RedactCoordinateQueryFilter())
 
 # Source names/IDs are preserved exactly as supplied in the supplied catalog.
 STATE_CODES: dict[str, str] = {
@@ -105,6 +128,19 @@ def _hospital_code_key(value: Any) -> str | None:
     if "-" in text:
         text = text.rsplit("-", 1)[-1].strip()
     return text or None
+
+
+def _valid_coordinate_pair(latitude: Any, longitude: Any) -> bool:
+    return (
+        isinstance(latitude, (int, float))
+        and not isinstance(latitude, bool)
+        and isinstance(longitude, (int, float))
+        and not isinstance(longitude, bool)
+        and math.isfinite(latitude)
+        and math.isfinite(longitude)
+        and -90 <= latitude <= 90
+        and -180 <= longitude <= 180
+    )
 
 
 def _map_group(raw: str) -> tuple[str | None, str]:
@@ -221,6 +257,7 @@ class ERaktKoshAdapter:
         self._inflight_lock = asyncio.Lock()
         self._retry_after_until = 0.0
         self._retry_after_clock = time.monotonic
+        self._nearest_cache: dict[tuple[float, float, int], dict[str, dict]] = {}
 
     def configured(self) -> tuple[bool, str]:
         return True, "fixed read-only e-RaktKosh bulk endpoint configured; source access is verified per search"
@@ -256,44 +293,91 @@ class ERaktKoshAdapter:
             else:
                 banks = result.banks
 
-            # Enrich coordinates only for facilities e-RaktKosh reports as nearest to the
-            # device origin (radius 1000 km). No geocoding/geocorrection is performed.
-            if origin is not None and banks:
-                try:
-                    olat, olon = origin
-                    nearest = await self._fetch_nearest_bloodbanks(float(olat), float(olon), 1000000)
-                except Exception as exc:
-                    log.info("Non-fatal nearest-bloodbank lookup error: %s", type(exc).__name__)
-                    nearest = {}
-                if nearest:
+            # Resolve coordinates nationwide, then ask the same endpoint for its reported
+            # straight-line distance from the consented device location. The nationwide
+            # lookup's `dist` is measured from India's centre and must never be shown as the
+            # user's distance. Device-origin results are deliberately not cached because
+            # the cache key would retain precise user coordinates in memory.
+            if banks:
+                lookups = [
+                    self._fetch_nearest_bloodbanks(
+                        20.5937, 78.9629, NATIONWIDE_COORDINATE_RADIUS_M,
+                    )
+                ]
+                has_device_origin = (
+                    isinstance(origin, (tuple, list))
+                    and len(origin) == 2
+                    and _valid_coordinate_pair(origin[0], origin[1])
+                )
+                if has_device_origin:
+                    lookups.append(self._fetch_nearest_bloodbanks(
+                        float(origin[0]), float(origin[1]), NEAREST_DEFAULT_RADIUS_M,
+                        cache=False,
+                    ))
+                lookup_results = await asyncio.gather(*lookups, return_exceptions=True)
+                nationwide = lookup_results[0] if isinstance(lookup_results[0], dict) else {}
+                if isinstance(lookup_results[0], Exception):
+                    log.info("Non-fatal nationwide nearest-bloodbank lookup error: %s",
+                             type(lookup_results[0]).__name__)
+                from_device = (
+                    lookup_results[1]
+                    if has_device_origin and len(lookup_results) > 1
+                    and isinstance(lookup_results[1], dict)
+                    else {}
+                )
+                if has_device_origin and len(lookup_results) > 1 and isinstance(lookup_results[1], Exception):
+                    log.info("Non-fatal device-distance lookup error: %s",
+                             type(lookup_results[1]).__name__)
+                if nationwide or from_device:
                     updated_banks = []
                     for bank in banks:
-                        key = _hospital_code_key(bank.bank_id)
-                        info = nearest.get(key) if key is not None else None
-                        if info is None:
-                            info = nearest.get(str(bank.bank_id))
-                        if info is None:
-                            log.debug("No nearest-endpoint match for bank %s (key=%s)", bank.bank_id, key)
+                        bank_key = _hospital_code_key(bank.bank_id)
+                        device_info = from_device.get(bank_key) if bank_key is not None else None
+                        nationwide_info = nationwide.get(bank_key) if bank_key is not None else None
+                        if device_info is None and nationwide_info is None:
+                            log.debug("No nearest-endpoint match for bank %s (key=%s)",
+                                      bank.bank_id, bank_key)
                             updated_banks.append(bank)
                             continue
+
+                        # Prefer the device lookup's facility pin, but fall back to the
+                        # nationwide pin if the local row omitted coordinates.
+                        info = device_info or nationwide_info or {}
                         try:
                             lat = float(info.get("latitude")) if info.get("latitude") is not None else None
                             lon = float(info.get("longitude")) if info.get("longitude") is not None else None
                         except (TypeError, ValueError):
-                            lat, lon = bank.latitude, bank.longitude
-                        bank = bank.model_copy(update={
-                            "latitude": lat if lat is not None else bank.latitude,
-                            "longitude": lon if lon is not None else bank.longitude,
-                            "location_precision": "FACILITY",
-                            "location_note": ("Location from e-RaktKosh nearest-bloodbank API "
-                                              "(device origin, 1000 km radius)."),
-                        })
-                        dist = info.get("distance")
-                        if dist is not None:
+                            lat, lon = None, None
+                        if not _valid_coordinate_pair(lat, lon):
+                            fallback = nationwide_info or {}
                             try:
-                                bank = bank.model_copy(update={"distance_km": float(dist) / 1000.0})
+                                lat = float(fallback.get("latitude")) if fallback.get("latitude") is not None else None
+                                lon = float(fallback.get("longitude")) if fallback.get("longitude") is not None else None
                             except (TypeError, ValueError):
-                                pass
+                                lat, lon = None, None
+
+                        updates: dict[str, Any] = {}
+                        if _valid_coordinate_pair(lat, lon):
+                            updates.update({
+                                "latitude": lat,
+                                "longitude": lon,
+                                "location_precision": "FACILITY",
+                                "location_note": "Location from e-RaktKosh nearest-bloodbank API.",
+                            })
+
+                        # The `dist` field is in metres and only the device-origin request
+                        # is a valid distance for this user. This also handles a source row
+                        # that has a distance but no usable facility coordinates.
+                        if device_info is not None:
+                            try:
+                                distance_m = float(device_info.get("distance"))
+                            except (TypeError, ValueError):
+                                distance_m = math.nan
+                            if math.isfinite(distance_m) and distance_m >= 0:
+                                updates["distance_km"] = round(distance_m / 1000, 3)
+
+                        if updates:
+                            bank = bank.model_copy(update=updates)
                         updated_banks.append(bank)
                     banks = updated_banks
             return result.model_copy(update={"records": selected, "banks": banks,
@@ -303,19 +387,23 @@ class ERaktKoshAdapter:
                 if self._inflight.get(key) is task and task.done():
                     self._inflight.pop(key, None)
 
-    async def _fetch_nearest_bloodbanks(self, latitude: float, longitude: float, radius_m: int) -> dict[str, dict]:
+    async def _fetch_nearest_bloodbanks(self, latitude: float, longitude: float, radius_m: int,
+                                        *, cache: bool = True) -> dict[str, dict]:
         """Call e-RaktKosh nearest-bloodbank portal endpoint; return {hospitalCode: {distance (m), lat, lon}}."""
+        cache_key = (latitude, longitude, radius_m)
+        cached = self._nearest_cache.get(cache_key) if cache else None
+        if cached is not None:
+            return {k: dict(v) for k, v in cached.items()}
         # Two distinct e-RaktKosh URLs are used by this service:
         #   1. stock endpoint (relay/direct)  -> _fetch_parse / fetch_stock
         #   2. nearest-banks endpoint (below) -> facility coordinates + distance
-        url = "https://eraktkosh.mohfw.gov.in/eraktkoshPortal/eraktkosh/bloodbank/nearest"
         params = {
             "latitude": latitude,
             "longitude": longitude,
             "radius": radius_m,
         }
         headers = {"Accept": "application/json", "User-Agent": "BloodSignal/1.0 (read-only hackathon availability search)"}
-        target = url
+        target = NEAREST_URL
         # The relay only supports the stock endpoint; nearest is always called directly.
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(self._timeout, connect=15.0),
@@ -349,7 +437,7 @@ class ERaktKoshAdapter:
                 dist = float(row.get("dist"))
             except (TypeError, ValueError):
                 continue
-            if dist > radius_m:
+            if not math.isfinite(dist) or dist < 0 or dist > radius_m:
                 continue
             lat = None
             lon = None
@@ -366,6 +454,8 @@ class ERaktKoshAdapter:
                 "latitude": lat,
                 "longitude": lon,
             }
+        if cache:
+            self._nearest_cache[cache_key] = {k: dict(v) for k, v in result.items()}
         return result
 
     async def _fetch_parse(self, state_code: str, component_id: str, component_name: str) -> SourceResult:
@@ -390,6 +480,11 @@ class ERaktKoshAdapter:
             raise SourceUnavailable(type(exc).__name__) from exc
 
         status = response.status_code
+        if self._relay_url and status == 401:
+            # The relay itself rejects a missing/incorrect X-Relay-Secret with 401 {"error":"unauthorized"}.
+            raise AccessNotPermitted(
+                "e-RaktKosh relay rejected the request (HTTP 401): check that ERAKTKOSH_RELAY_SECRET "
+                "matches the relay's RELAY_SECRET; automated access stopped")
         if status in (401, 403) or 300 <= status < 400:
             raise AccessNotPermitted(f"e-RaktKosh returned HTTP {status}; automated access stopped")
         if status == 429:

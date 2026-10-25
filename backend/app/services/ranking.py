@@ -106,15 +106,25 @@ def add_distance_metadata(
                     )
             elif not destination_valid:
                 # Facility location problem
-                reason = (
-                    f"Exact distance is unavailable: this facility has no valid coordinates "
-                    f"(lat={bank.latitude}, lon={bank.longitude}). "
-                    f"Facility may need re-geocoding."
-                )
-                log.warning(
-                    f"Invalid facility coordinates for {bank.name}: "
-                    f"lat={bank.latitude}, lon={bank.longitude}"
-                )
+                if bank.location_precision is None:
+                    reason = (
+                        "Exact distance is unavailable: this facility has no published "
+                        "coordinates in the source data."
+                    )
+                    log.debug(
+                        "No published coordinates for %s (bank_id=%s); distance left unavailable.",
+                        bank.name, bank.bank_id,
+                    )
+                else:
+                    reason = (
+                        f"Exact distance is unavailable: this facility has no valid coordinates "
+                        f"(lat={bank.latitude}, lon={bank.longitude}). "
+                        f"Facility may need re-geocoding."
+                    )
+                    log.warning(
+                        f"Invalid facility coordinates for {bank.name}: "
+                        f"lat={bank.latitude}, lon={bank.longitude}"
+                    )
             else:
                 # Should not happen
                 reason = "Exact distance is unavailable for unknown reasons."
