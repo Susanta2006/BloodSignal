@@ -136,7 +136,7 @@ class NominatimGeocoder:
         # Check Redis cache if available
         if self.redis_client:
             try:
-                cached = await asyncio.to_thread(self.redis_client.get, cache_key)
+                cached = await self.redis_client.get(cache_key)
                 if cached:
                     try:
                         lat, lon, prec = json.loads(cached)
