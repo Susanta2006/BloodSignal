@@ -8,7 +8,7 @@ from typing import Iterable
 from app.schemas import Candidate, EvidenceState, MatchState, Section
 
 EARTH_RADIUS_KM = 6371.0088
-RANKING_VERSION = "freshness-availability-distance-2.2.0"
+RANKING_VERSION = "emergency-sufficient-freshness-distance-3.0.0"
 
 
 def valid_coordinate_pair(latitude: object, longitude: object) -> bool:
@@ -137,30 +137,47 @@ def add_distance_metadata(
 
 
 
-def _tier(candidate: Candidate) -> tuple[int, str]:
-    if candidate.source_type == "demo":
-        if candidate.section == Section.A_ELIGIBLE and candidate.match_state == MatchState.MATCHED_REPORTED:
-            return 4, "Synthetic demo-only inventory reports a full match; it is not verified real stock."
-        if (
-            candidate.section == Section.C_INSUFFICIENT
-            and candidate.match_state == MatchState.INSUFFICIENT
-            and candidate.evidence_state == EvidenceState.FRESH
-        ):
-            return 5, "Synthetic demo inventory reports partial quantity; it is not verified real stock."
-        if candidate.section == Section.D_MISMATCH:
-            return 7, "Synthetic demo inventory does not match the requested blood group or component."
-        return 6, "Synthetic inventory is demo-only and is not verified real stock."
-    if candidate.section == Section.A_ELIGIBLE and candidate.match_state == MatchState.MATCHED_REPORTED:
-        return 1, "Fresh live inventory evidence confirms the requested component and quantity."
-    if (
-        candidate.section == Section.C_INSUFFICIENT
-        and candidate.match_state == MatchState.INSUFFICIENT
-        and candidate.evidence_state == EvidenceState.FRESH
+def _is_fresh(candidate: Candidate, now: datetime, freshness_hours: int) -> bool:
+    updated = candidate.source_updated_at
+    state = getattr(candidate.evidence_state, "value", candidate.evidence_state)
+    if updated is None or state in (
+        EvidenceState.UNKNOWN_FRESHNESS.value,
+        EvidenceState.CONFLICTING_REPORTS.value,
+        EvidenceState.SOURCE_UNAVAILABLE.value,
     ):
-        return 2, "Fresh live inventory evidence reports partial quantity below the request."
+        return False
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    age_hours = (now - updated).total_seconds() / 3600
+    return 0 <= age_hours <= freshness_hours
+
+
+def _is_sufficient(candidate: Candidate, requested_quantity: int) -> bool:
+    return (
+        candidate.match_state == MatchState.MATCHED_REPORTED
+        and candidate.quantity_reported is not None
+        and candidate.quantity_reported >= requested_quantity
+        and requested_quantity > 0
+        and candidate.section == Section.A_ELIGIBLE
+    )
+
+
+def _tier(candidate: Candidate, now: datetime, freshness_hours: int, requested_quantity: int) -> tuple[int, str]:
+    """Emergency ordering: sufficient+fresh, sufficient+stale, then partial evidence."""
+    demo = candidate.source_type == "demo"
     if candidate.section == Section.D_MISMATCH:
-        return 5, "The source record does not match the requested blood group or component."
-    return 3, "Inventory is unknown, stale, conflicting, or unavailable; availability is unconfirmed."
+        return (9 if demo else 8), "The source record does not match the requested blood group or component."
+    sufficient = _is_sufficient(candidate, requested_quantity)
+    fresh = _is_fresh(candidate, now, freshness_hours)
+    if sufficient and fresh:
+        return (7 if demo else 1), "Reported quantity is sufficient and the source report is fresh."
+    if sufficient:
+        return (8 if demo else 2), "Reported quantity is sufficient, but the source report is stale or freshness is unknown. Reconfirm by phone."
+    if candidate.match_state == MatchState.INSUFFICIENT and candidate.quantity_reported is not None and candidate.quantity_reported > 0:
+        if fresh:
+            return (6 if demo else 5), "Fresh source data reports positive stock below the requested quantity."
+        return (5 if demo else 3), "Positive stock is insufficient and the source report is stale or freshness is unknown."
+    return (6 if demo else 4), "Stock is unknown, unavailable, conflicting, or not positively reported; availability is unconfirmed."
 
 
 def _freshness_score(candidate: Candidate, now: datetime, freshness_hours: int) -> float:
@@ -247,19 +264,14 @@ def rank_candidates(
                distance_weight / total_weight)
     prepared = []
     for candidate in candidates:
-        tier, tier_reason = _tier(candidate)
+        tier, tier_reason = _tier(candidate, now, freshness_hours, requested_quantity)
         fresh = _freshness_score(candidate, now, freshness_hours)
         quantity = _quantity_score(candidate, requested_quantity)
-        source_tier = (
-            2 if candidate.source_type == "demo"
-            else 0 if _is_positive_exact_match(candidate)
-            else 1
-        )
         freshness_bucket, timestamp_key = _freshness_order(candidate, now, freshness_hours)
         availability_bucket, quantity_key = _availability_order(candidate, requested_quantity)
         distance = (
             1.0 / (1.0 + candidate.distance_km / distance_scale_km)
-            if candidate.distance_km is not None
+            if candidate.distance_km is not None and distance_scale_km > 0
             else 0.0
         )
         score = weights[0] * fresh + weights[1] * quantity + weights[2] * distance
@@ -269,16 +281,32 @@ def rank_candidates(
         distance_reason = (
             f"straight-line distance {candidate.distance_km:.3f} km was included"
             if candidate.distance_km is not None
-            else "distance was unavailable and did not affect the score"
+            else "distance was unavailable and did not affect ordering"
         )
         candidate.ranking_explanation = (
-            f"Tier {tier}. {tier_reason} Exact positive live reports are ordered by source freshness, "
-            "then surplus stock, exact requested quantity, partial stock, and proximity; "
-            f"{distance_reason}. The weighted evidence score is also included for reference."
+            f"Priority tier {tier}. {tier_reason} Within the same priority tier, shortest validated "
+            f"straight-line distance ranks first; {distance_reason}."
         )
+        sufficient = _is_sufficient(candidate, requested_quantity)
+        fresh_flag = _is_fresh(candidate, now, freshness_hours)
+        demo_flag = candidate.source_type == "demo"
+        # Priority classes follow emergency policy; distance is the primary tie-breaker.
+        if sufficient and fresh_flag:
+            priority = 7 if demo_flag else 0
+        elif sufficient:
+            priority = 8 if demo_flag else 1
+        elif candidate.match_state == MatchState.INSUFFICIENT and candidate.quantity_reported is not None and candidate.quantity_reported > 0 and not fresh_flag:
+            priority = 9 if demo_flag else 2
+        elif candidate.match_state == MatchState.INSUFFICIENT and candidate.quantity_reported is not None and candidate.quantity_reported > 0 and fresh_flag:
+            priority = 10 if demo_flag else 3
+        elif candidate.section == Section.D_MISMATCH:
+            priority = 12 if demo_flag else 5
+        else:
+            priority = 11 if demo_flag else 4
         prepared.append((
-            (source_tier, freshness_bucket, timestamp_key, availability_bucket, quantity_key,
+            (priority,
              candidate.distance_km if candidate.distance_km is not None else math.inf,
+             freshness_bucket, timestamp_key, availability_bucket, quantity_key,
              candidate.bank.name.casefold(), candidate.bank.bank_id),
             candidate,
         ))

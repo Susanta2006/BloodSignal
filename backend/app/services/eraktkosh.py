@@ -293,93 +293,39 @@ class ERaktKoshAdapter:
             else:
                 banks = result.banks
 
-            # Resolve coordinates nationwide, then ask the same endpoint for its reported
-            # straight-line distance from the consented device location. The nationwide
-            # lookup's `dist` is measured from India's centre and must never be shown as the
-            # user's distance. Device-origin results are deliberately not cached because
-            # the cache key would retain precise user coordinates in memory.
+            # Fetch facility coordinates from the official nearest-bloodbank endpoint.
+            # Its `dist` value is relative to the query origin and is deliberately NOT
+            # used for ranking: all user-to-facility distances are calculated locally
+            # from validated coordinates with Haversine in ranking.add_distance_metadata.
             if banks:
-                lookups = [
-                    self._fetch_nearest_bloodbanks(
+                try:
+                    nationwide = await self._fetch_nearest_bloodbanks(
                         20.5937, 78.9629, NATIONWIDE_COORDINATE_RADIUS_M,
                     )
-                ]
-                has_device_origin = (
-                    isinstance(origin, (tuple, list))
-                    and len(origin) == 2
-                    and _valid_coordinate_pair(origin[0], origin[1])
-                )
-                if has_device_origin:
-                    lookups.append(self._fetch_nearest_bloodbanks(
-                        float(origin[0]), float(origin[1]), NEAREST_DEFAULT_RADIUS_M,
-                        cache=False,
-                    ))
-                lookup_results = await asyncio.gather(*lookups, return_exceptions=True)
-                nationwide = lookup_results[0] if isinstance(lookup_results[0], dict) else {}
-                if isinstance(lookup_results[0], Exception):
-                    log.info("Non-fatal nationwide nearest-bloodbank lookup error: %s",
-                             type(lookup_results[0]).__name__)
-                from_device = (
-                    lookup_results[1]
-                    if has_device_origin and len(lookup_results) > 1
-                    and isinstance(lookup_results[1], dict)
-                    else {}
-                )
-                if has_device_origin and len(lookup_results) > 1 and isinstance(lookup_results[1], Exception):
-                    log.info("Non-fatal device-distance lookup error: %s",
-                             type(lookup_results[1]).__name__)
-                if nationwide or from_device:
-                    updated_banks = []
-                    for bank in banks:
-                        bank_key = _hospital_code_key(bank.bank_id)
-                        device_info = from_device.get(bank_key) if bank_key is not None else None
-                        nationwide_info = nationwide.get(bank_key) if bank_key is not None else None
-                        if device_info is None and nationwide_info is None:
-                            log.debug("No nearest-endpoint match for bank %s (key=%s)",
-                                      bank.bank_id, bank_key)
-                            updated_banks.append(bank)
-                            continue
-
-                        # Prefer the device lookup's facility pin, but fall back to the
-                        # nationwide pin if the local row omitted coordinates.
-                        info = device_info or nationwide_info or {}
-                        try:
-                            lat = float(info.get("latitude")) if info.get("latitude") is not None else None
-                            lon = float(info.get("longitude")) if info.get("longitude") is not None else None
-                        except (TypeError, ValueError):
-                            lat, lon = None, None
-                        if not _valid_coordinate_pair(lat, lon):
-                            fallback = nationwide_info or {}
-                            try:
-                                lat = float(fallback.get("latitude")) if fallback.get("latitude") is not None else None
-                                lon = float(fallback.get("longitude")) if fallback.get("longitude") is not None else None
-                            except (TypeError, ValueError):
-                                lat, lon = None, None
-
-                        updates: dict[str, Any] = {}
-                        if _valid_coordinate_pair(lat, lon):
-                            updates.update({
-                                "latitude": lat,
-                                "longitude": lon,
-                                "location_precision": "FACILITY",
-                                "location_note": "Location from e-RaktKosh nearest-bloodbank API.",
-                            })
-
-                        # The `dist` field is in metres and only the device-origin request
-                        # is a valid distance for this user. This also handles a source row
-                        # that has a distance but no usable facility coordinates.
-                        if device_info is not None:
-                            try:
-                                distance_m = float(device_info.get("distance"))
-                            except (TypeError, ValueError):
-                                distance_m = math.nan
-                            if math.isfinite(distance_m) and distance_m >= 0:
-                                updates["distance_km"] = round(distance_m / 1000, 3)
-
-                        if updates:
-                            bank = bank.model_copy(update=updates)
+                except Exception as exc:
+                    log.info("Non-fatal facility-coordinate lookup error: %s", type(exc).__name__)
+                    nationwide = {}
+                updated_banks = []
+                for bank in banks:
+                    info = nationwide.get(_hospital_code_key(bank.bank_id) or "")
+                    if not isinstance(info, dict):
                         updated_banks.append(bank)
-                    banks = updated_banks
+                        continue
+                    try:
+                        lat = float(info.get("latitude")) if info.get("latitude") is not None else None
+                        lon = float(info.get("longitude")) if info.get("longitude") is not None else None
+                    except (TypeError, ValueError):
+                        lat, lon = None, None
+                    if _valid_coordinate_pair(lat, lon):
+                        bank = bank.model_copy(update={
+                            "latitude": lat,
+                            "longitude": lon,
+                            "location_precision": "FACILITY",
+                            "location_note": "Coordinates supplied by e-RaktKosh nearest-bloodbank endpoint; distance is calculated from validated coordinates.",
+                            "distance_km": None,
+                        })
+                    updated_banks.append(bank)
+                banks = updated_banks
             return result.model_copy(update={"records": selected, "banks": banks,
                                              "checked_bank_ids": [b.bank_id for b in banks]})
         finally:

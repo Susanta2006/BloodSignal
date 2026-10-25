@@ -308,11 +308,8 @@ class Orchestrator:
                 adjacent_banks = []
                 contributed_usable = False
                 for district_name in nearby_districts(req.district)[:3]:
-                    if any(
-                        quantity >= req.quantity
-                        for quantity in usable_by_bank([*result.records, *neighboring_records]).values()
-                    ):
-                        break
+                    # Check every configured neighboring district so the final ranking can choose
+                    # the nearest qualifying facility across the searched area, not merely the first hit.
                     areas_checked.append(district_name)
                     new_banks = []
                     try:
@@ -377,10 +374,9 @@ class Orchestrator:
                     usable_after = usable_by_bank([*result.records, *neighboring_records])
                     if sum(usable_after.values()) > local_total:
                         contributed_usable = True
-                    if any(quantity >= req.quantity for quantity in usable_after.values()):
-                        break
+                    # Do not stop at the first qualifying district: compare all checked districts by distance.
 
-                if neighboring_records and contributed_usable:
+                if neighboring_records:
                     merged_records = [*result.records, *neighboring_records]
                     record_bank_ids = {row.bank_source_id for row in neighboring_records}
                     banks.extend(bank for bank in adjacent_banks if bank.bank_id in record_bank_ids)
@@ -399,9 +395,8 @@ class Orchestrator:
                         "Confirm the source-reported district and current stock directly with the facility."
                     )
                 elif neighboring_records:
-                    # Do not inject unverified/non-contributing adjacent rows into ranked results.
                     expansion_warnings.append(
-                        "Nearby districts were checked, but no current, exact-scope positive stock report contributed to fulfillment."
+                        "Nearby districts returned records, but none could be safely merged into the result set."
                     )
             run.plan["districts"] = areas_checked
             run.plan["search_level"] = search_level
