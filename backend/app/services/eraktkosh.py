@@ -217,6 +217,7 @@ class ERaktKoshAdapter:
                           quantity=None, origin=None) -> SourceResult:
         source_component = INTERNAL_COMPONENT_TO_SOURCE.get(component)
         component_id = _lookup_code(COMPONENT_CODES, source_component)
+        state_code = _lookup_code(STATE_CODES, state)
         if not state_code:
             raise SourceRequestRejected("Select a state from the supported e-RaktKosh state catalog")
         if not component_id:
