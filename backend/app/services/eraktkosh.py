@@ -285,19 +285,19 @@ class ERaktKoshAdapter:
                     self._inflight.pop(key, None)
 
     async def _fetch_nearest_bloodbanks(self, latitude: float, longitude: float, radius_m: int) -> dict[str, dict]:
-        """Call e-RaktKosh nearest-bloodbank endpoint; return {hospitalCode: {distance (m), ...}}."""
-        url = "https://eraktkosh.mohfw.gov.in/BLDAHIMS/bloodbank/nearbyBB.cnt"
+        """Call e-RaktKosh nearest-bloodbank portal endpoint; return {hospitalCode: {distance (m), lat, lon}}."""
+        # Two distinct e-RaktKosh URLs are used by this service:
+        #   1. stock endpoint (relay/direct)  -> _fetch_parse / fetch_stock
+        #   2. nearest-banks endpoint (below) -> facility coordinates + distance
+        url = "https://eraktkosh.mohfw.gov.in/eraktkoshPortal/eraktkosh/bloodbank/nearest"
         params = {
-            "hmode": "GETNEARBYBLOODBANK",
             "latitude": latitude,
             "longitude": longitude,
-            "lang": "en",
+            "radius": radius_m,
         }
         headers = {"Accept": "application/json", "User-Agent": "BloodSignal/1.0 (read-only hackathon availability search)"}
         target = url
-        if self._relay_url:
-            # Relay only supports the stock endpoint; nearest is called directly.
-            pass
+        # The relay only supports the stock endpoint; nearest is always called directly.
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(self._timeout, connect=15.0),
                                           transport=self._transport, follow_redirects=False) as client:
@@ -307,39 +307,42 @@ class ERaktKoshAdapter:
         if response.status_code != 200:
             return {}
         try:
-            payload = json.loads(response.content.decode("latin-1"))
+            payload = json.loads(response.content.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
+            try:
+                payload = json.loads(response.content.decode("latin-1"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return {}
+        if not isinstance(payload, list):
             return {}
-        rows = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(rows, list):
-            return {}
-        radius_km = radius_m / 1000.0
         result: dict[str, dict] = {}
-        for row in rows:
-            if not isinstance(row, list) or len(row) < 8:
+        for row in payload:
+            if not isinstance(row, dict):
                 continue
-            code_match = None
-            try:
-                import re as _re
-                code_match = _re.search(r"hospitalCode=(\d+)", str(row[7]))
-            except Exception:
-                code_match = None
-            code = code_match.group(1) if code_match else None
-            if not code:
+            code = row.get("hospitalCode")
+            if code is None:
                 continue
-            distance_km = None
+            code = str(code)
             try:
-                distance_km = float(row[6])
+                dist = float(row.get("dist"))
             except (TypeError, ValueError):
-                distance_km = None
-            if distance_km is None:
                 continue
-            if distance_km > radius_km:
+            if dist > radius_m:
                 continue
+            lat = None
+            lon = None
+            try:
+                lat = float(row.get("latitude"))
+            except (TypeError, ValueError):
+                lat = None
+            try:
+                lon = float(row.get("longitude"))
+            except (TypeError, ValueError):
+                lon = None
             result[code] = {
-                "distance": distance_km * 1000.0,
-                "latitude": None,
-                "longitude": None,
+                "distance": dist,
+                "latitude": lat,
+                "longitude": lon,
             }
         return result
 
