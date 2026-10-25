@@ -61,6 +61,16 @@ def add_distance_metadata(
         # Validate origin coordinates
         origin_valid = origin is not None and valid_coordinate_pair(*origin)
         
+        # Prefer a distance already supplied by the source (nearest-bloodbank API),
+        # available even when facility coordinates are absent.
+        source_distance = getattr(bank, "distance_km", None)
+        if isinstance(source_distance, (int, float)) and not isinstance(source_distance, bool) and math.isfinite(source_distance) and source_distance >= 0:
+            candidate.distance_km = round(float(source_distance), 3)
+            candidate.distance_type = "straight_line"
+            candidate.distance_is_approximate = True
+            candidate.distance_unavailable_reason = None
+            continue
+
         # Validate facility coordinates  
         destination_valid = valid_coordinate_pair(bank.latitude, bank.longitude)
         destination = (bank.latitude, bank.longitude) if destination_valid else None

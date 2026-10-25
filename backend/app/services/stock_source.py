@@ -74,8 +74,7 @@ class StockSourceAdapter(Protocol):
     async def status(self) -> SourceStatusInfo: ...
     async def fetch_stock(self, bank_ids: list[str], blood_group: str, component: str,
                           district: str | None, *, state: str | None = None,
-                          quantity: int | None = None) -> SourceResult: ...
-
+                          quantity: int | None = None, origin=None) -> SourceResult: ...
 
 class DemoStockAdapter:
     source_id = DEMO_SOURCE_ID
@@ -95,7 +94,7 @@ class DemoStockAdapter:
         return SourceStatusInfo("DEMO", "Synthetic demo fixtures; not live stock")
 
     async def fetch_stock(self, bank_ids, blood_group, component, district, *, state=None,
-                          quantity=None) -> SourceResult:
+                          quantity=None, origin=None) -> SourceResult:
         if (district or "").strip().lower() == "demo timeout":
             raise SourceUnavailable("simulated source timeout")
         now = self._clock()

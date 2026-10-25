@@ -1,4 +1,4 @@
-"""ERaktKosh bulk endpoint adapter with geocoding support."""
+"""ERaktKosh bulk endpoint adapter with nearest-bloodbank geo enrichment."""
 
 from __future__ import annotations
 
@@ -15,9 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
-from app.agents.geocorrect import GeoCorrectAgent
 from app.schemas import BloodBank, NormalizedStockRecord, utcnow
-from app.services.geocoding import NominatimGeocoder
 from app.services.stock_source import (
     AccessNotPermitted,
     SourceMalformed,
@@ -191,10 +189,10 @@ class ERaktKoshAdapter:
                  clock: Callable[[], datetime] = utcnow,
                  transport: httpx.AsyncBaseTransport | None = None,
                  sleep: Callable[[float], Any] = asyncio.sleep,
-                 geocoder: NominatimGeocoder | None = None, geocoder_candidate_limit: int = 10,
-                 geocoder_time_budget_s: float = 3.0,
                  relay_url: str = "", relay_secret: str = "",
-                 redis_client: Any = None):
+                 # Backwards-compatible, unused knobs (geocoding removed):
+                 geocoder: Any = None, geocoder_candidate_limit: int = 10,
+                 geocoder_time_budget_s: float = 3.0, redis_client: Any = None):
         self._base = OFFICIAL_URL
         self._relay_url = relay_url.strip()
         self._relay_secret = relay_secret
@@ -208,13 +206,6 @@ class ERaktKoshAdapter:
         self._inflight_lock = asyncio.Lock()
         self._retry_after_until = 0.0
         self._retry_after_clock = time.monotonic
-        self._geocoder = geocoder
-        self._geocoder_candidate_limit = geocoder_candidate_limit
-        self._geocoder_time_budget_s = geocoder_time_budget_s
-
-        # Initialize the GeoCorrect Agent (Redis Cache + Rule-based + Gemini 3.5 Flash-Lite fallback)
-        # Pass the shared Redis client so geocoding cache is shared across processes
-        self._geo_agent = GeoCorrectAgent(redis_client=redis_client)
 
     def configured(self) -> tuple[bool, str]:
         return True, "fixed read-only e-RaktKosh bulk endpoint configured; source access is verified per search"
@@ -223,8 +214,7 @@ class ERaktKoshAdapter:
         return SourceStatusInfo("READY", "e-RaktKosh endpoint configured; live access is checked on each search")
 
     async def fetch_stock(self, bank_ids, blood_group, component, district, *, state=None,
-                          quantity=None) -> SourceResult:
-        state_code = _lookup_code(STATE_CODES, state)
+                          quantity=None, origin=None) -> SourceResult:
         source_component = INTERNAL_COMPONENT_TO_SOURCE.get(component)
         component_id = _lookup_code(COMPONENT_CODES, source_component)
         if not state_code:
@@ -250,55 +240,110 @@ class ERaktKoshAdapter:
             else:
                 banks = result.banks
 
-            if self._geocoder and self._geocoder.enabled and banks:
-                import time as _time
-                deadline = _time.monotonic() + self._geocoder_time_budget_s
-                updated_banks = []
-                count = 0
-                for bank in banks:
-                    valid_coordinate_pair = (
-                        isinstance(bank.latitude, (int, float))
-                        and not isinstance(bank.latitude, bool)
-                        and isinstance(bank.longitude, (int, float))
-                        and not isinstance(bank.longitude, bool)
-                        and -90 <= bank.latitude <= 90
-                        and -180 <= bank.longitude <= 180
-                    )
-                    needs_geocoding = (
-                        not valid_coordinate_pair or bank.location_precision == "LOCALITY"
-                    )
-                    if (needs_geocoding and
-                            count < self._geocoder_candidate_limit and _time.monotonic() < deadline):
-                        count += 1
+            # Enrich coordinates only for facilities e-RaktKosh reports as nearest to the
+            # device origin (radius 3000 m). No geocoding/geocorrection is performed.
+            if origin is not None and banks:
+                try:
+                    olat, olon = origin
+                    nearest = await self._fetch_nearest_bloodbanks(float(olat), float(olon), 3000)
+                except Exception as exc:
+                    log.info("Non-fatal nearest-bloodbank lookup error: %s", type(exc).__name__)
+                    nearest = {}
+                if nearest:
+                    kept_ids = set()
+                    updated_banks = []
+                    for bank in banks:
+                        info = nearest.get(str(bank.bank_id))
+                        if info is None:
+                            continue
                         try:
-                            # Delegate name cleaning and resolution to GeoCorrect Agent (Redis -> Rules -> Gemini 3.5 Flash-Lite)
-                            found = await self._geo_agent.resolve_location(
-                                name=bank.name,
-                                address=bank.address,
-                                district=district or bank.district,
-                                state=state,
-                                geocoder=self._geocoder
-                            )
-
-                            if found:
-                                lat, lon, precision = found
-                                bank = bank.model_copy(update={
-                                    "latitude": lat, "longitude": lon,
-                                    "state": bank.state or state,
-                                    "location_precision": precision,
-                                    "location_note": ("Approximate location geocoded via GeoCorrect Agent (town/district centre; © OpenStreetMap contributors). Distance is approximate, straight-line, not road distance."
-                                                      if precision == "LOCALITY" else
-                                                       "Location geocoded via GeoCorrect Agent (© OpenStreetMap contributors). Distance is approximate, straight-line, not road distance.")})
-                        except Exception as exc:
-                            log.info("Non-fatal geocoding error: %s", type(exc).__name__)
-                    updated_banks.append(bank)
-                banks = updated_banks
+                            lat = float(info.get("latitude")) if info.get("latitude") is not None else None
+                            lon = float(info.get("longitude")) if info.get("longitude") is not None else None
+                        except (TypeError, ValueError):
+                            lat, lon = bank.latitude, bank.longitude
+                        bank = bank.model_copy(update={
+                            "latitude": lat if lat is not None else bank.latitude,
+                            "longitude": lon if lon is not None else bank.longitude,
+                            "location_precision": "FACILITY",
+                            "location_note": ("Location from e-RaktKosh nearest-bloodbank API "
+                                              "(device origin, 3 km radius)."),
+                        })
+                        dist = info.get("distance")
+                        if dist is not None:
+                            try:
+                                bank = bank.model_copy(update={"distance_km": float(dist) / 1000.0})
+                            except (TypeError, ValueError):
+                                pass
+                        updated_banks.append(bank)
+                        kept_ids.add(str(bank.bank_id))
+                    if updated_banks:
+                        banks = updated_banks
+                        selected = [r for r in selected if str(r.bank_source_id) in kept_ids]
             return result.model_copy(update={"records": selected, "banks": banks,
                                              "checked_bank_ids": [b.bank_id for b in banks]})
         finally:
             async with self._inflight_lock:
                 if self._inflight.get(key) is task and task.done():
                     self._inflight.pop(key, None)
+
+    async def _fetch_nearest_bloodbanks(self, latitude: float, longitude: float, radius_m: int) -> dict[str, dict]:
+        """Call e-RaktKosh nearest-bloodbank endpoint; return {hospitalCode: {distance (m), ...}}."""
+        url = "https://eraktkosh.mohfw.gov.in/BLDAHIMS/bloodbank/nearbyBB.cnt"
+        params = {
+            "hmode": "GETNEARBYBLOODBANK",
+            "latitude": latitude,
+            "longitude": longitude,
+            "lang": "en",
+        }
+        headers = {"Accept": "application/json", "User-Agent": "BloodSignal/1.0 (read-only hackathon availability search)"}
+        target = url
+        if self._relay_url:
+            # Relay only supports the stock endpoint; nearest is called directly.
+            pass
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(self._timeout, connect=15.0),
+                                          transport=self._transport, follow_redirects=False) as client:
+                response = await client.get(target, params=params, headers=headers)
+        except httpx.HTTPError:
+            return {}
+        if response.status_code != 200:
+            return {}
+        try:
+            payload = json.loads(response.content.decode("latin-1"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return {}
+        rows = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            return {}
+        radius_km = radius_m / 1000.0
+        result: dict[str, dict] = {}
+        for row in rows:
+            if not isinstance(row, list) or len(row) < 8:
+                continue
+            code_match = None
+            try:
+                import re as _re
+                code_match = _re.search(r"hospitalCode=(\d+)", str(row[7]))
+            except Exception:
+                code_match = None
+            code = code_match.group(1) if code_match else None
+            if not code:
+                continue
+            distance_km = None
+            try:
+                distance_km = float(row[6])
+            except (TypeError, ValueError):
+                distance_km = None
+            if distance_km is None:
+                continue
+            if distance_km > radius_km:
+                continue
+            result[code] = {
+                "distance": distance_km * 1000.0,
+                "latitude": None,
+                "longitude": None,
+            }
+        return result
 
     async def _fetch_parse(self, state_code: str, component_id: str, component_name: str) -> SourceResult:
         params = {"stateCode": state_code, "componentId": component_id}

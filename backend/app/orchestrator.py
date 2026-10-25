@@ -206,7 +206,7 @@ class Orchestrator:
                 res = await asyncio.wait_for(
                     self.stock.fetch_stock([b.bank_id for b in banks], req.blood_group.value,
                                            req.component.value, req.district, state=req.state,
-                                           quantity=req.quantity),
+                                           quantity=req.quantity, origin=origin),
                     timeout=self.s.stock_source_timeout_s)
             except asyncio.TimeoutError as e:
                 raise SourceUnavailable("timeout") from e
@@ -319,7 +319,7 @@ class Orchestrator:
                         if provides:
                             extra = await asyncio.wait_for(
                                 self.stock.fetch_stock([], req.blood_group.value, req.component.value,
-                                                       district_name, state=req.state, quantity=req.quantity),
+                                                       district_name, state=req.state, quantity=req.quantity, origin=origin),
                                 timeout=self.s.stock_source_timeout_s)
                             candidate_banks = list(extra.banks)
                         else:
@@ -336,7 +336,7 @@ class Orchestrator:
                             extra = await asyncio.wait_for(
                                 self.stock.fetch_stock([bank.bank_id for bank in candidate_banks],
                                                        req.blood_group.value, req.component.value,
-                                                       district_name, state=req.state, quantity=req.quantity),
+                                                       district_name, state=req.state, quantity=req.quantity, origin=origin),
                                 timeout=self.s.stock_source_timeout_s)
                     except (DirectoryUnavailable, SourceError, asyncio.TimeoutError) as exc:
                         expansion_warnings.append(

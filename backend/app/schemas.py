@@ -193,6 +193,7 @@ class BloodBank(BaseModel):
     longitude: float | None = None
     location_precision: Literal["FACILITY", "LOCALITY"] | None = None
     location_note: str | None = None
+    distance_km: float | None = None   # nearest-source distance when geocoding is not performed
     opening_hours: list[str] | None = None
     city: str | None = None
     district: str | None = None
