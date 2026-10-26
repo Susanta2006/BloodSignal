@@ -16,6 +16,27 @@ import { SiteFooter, SiteHeader } from "@/components/site-shell";
 import { Button } from "@/components/ui/button";
 import { Cookie, Settings2 } from "lucide-react";
 
+const applicationStructuredData = {
+  "@context": "https://schema.org",
+  "@type": ["SoftwareApplication", "WebApplication"],
+  name: "LabBench",
+  url: "https://bloodsignal.vercel.app/",
+  description: "BloodSignal is an evidence-aware blood-bank discovery application built by Team Pragmatrix. It helps families and care teams organize a search by blood group, component, quantity, and location.",
+  applicationCategory: "DeveloperApplication",
+  operatingSystem: "All",
+  founder: {
+    "@type": "Person",
+    name: "Susanta Banik",
+    url: "https://susanta-banik.vercel.app",
+  },
+  featureList: [
+    "Evidence-aware blood bank discovery application",
+    "Integrated map coordinates with proper ranking for efficiency",
+    "AI Voice typing and provides true evidence",
+    "Clearly shows and requests users to call to confirm",
+  ],
+};
+
 function NotFoundComponent() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
@@ -83,9 +104,10 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
+      { name: "google-site-verification", content: "8o9Dm94uzc3XtGBMijfLCeGXH8k0MQgKiY1eZskSbjE" },
       { title: "BloodSignal by Pragmatrix" },
-      { name: "description", content: "Find blood. Verify the source. Call before you travel." },
-      { name: "author", content: "Pragmatrix" },
+      { name: "description", content: "BloodSignal is an evidence-aware blood-bank discovery application built by Team Pragmatrix. It helps families and care teams organize a search by blood group, component, quantity, and location." },
+      { name: "team", content: "Pragmatrix" },
       { property: "og:site_name", content: "BloodSignal" },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },
@@ -110,6 +132,10 @@ function RootShell({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
       <head>
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(applicationStructuredData) }}
+        />
         <HeadContent />
       </head>
       <body>
