@@ -16,19 +16,62 @@ import { Button } from "@/components/ui/button";
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "BloodSignal — Find blood banks with clearer evidence" },
+      {
+        name: "title",
+        content: "BloodSignal — Find Blood, Save Lives",
+      },
       {
         name: "description",
         content:
-          "Search blood-bank directories by blood group, component, quantity and district. Review source evidence and freshness before travelling.",
+          "Find nearby blood banks and check blood availability with BloodSignal. Discover blood stock information and locate facilities when every second matters.",
       },
-      { property: "og:title", content: "BloodSignal — AI Blood Availability Finder" },
       {
-        property: "og:description",
-        content: "Find blood banks. Understand availability. Act with better information.",
+        name: "keywords",
+        content:
+          "BloodSignal, Susanta Banik, blood bank locator, blood availability, blood stock, nearby blood banks, blood donation, emergency blood search, e-RaktKosh, India blood banks",
       },
       { property: "og:type", content: "website" },
+      {
+        property: "og:title",
+        content: "BloodSignal — Find Blood, Save Lives",
+      },
+      {
+        property: "og:description",
+        content:
+          "Search blood availability, discover nearby blood banks, and find the information you need when every second matters.",
+      },
+      {
+        property: "og:url",
+        content: "https://bloodsignal.vercel.app/",
+      },
+      {
+        property: "og:image",
+        content: "https://bloodsignal.vercel.app/og-image.png",
+      },
+      {
+        property: "og",
+        content: "BloodSignal — Developed by Susanta Banik",
+      },
       { name: "twitter:card", content: "summary_large_image" },
+      {
+        name: "twitter:title",
+        content: "BloodSignal — Find Blood, Save Lives",
+      },
+      {
+        name: "twitter:description",
+        content:
+          "Search blood availability and locate nearby blood banks with BloodSignal.",
+      },
+      {
+        name: "twitter:image",
+        content: "https://bloodsignal.vercel.app/og-image.png",
+      },
+    ],
+    links: [
+      {
+        rel: "canonical",
+        href: "https://bloodsignal.vercel.app/",
+      },
     ],
   }),
   component: HomePage,
